@@ -61,18 +61,18 @@ async def run(process_run_id: str, business_date: date) -> None:
         m.rows_processed = len(gaps)
         m.extra_info = {"total_gaps": len(gaps)}
 
-    goszakup_rows = [g for g in gaps if Portal.GOSZAKUP.value.lower() in g.naim_portala.lower()]
     samruk_rows = [g for g in gaps if Portal.SAMRUK.value.lower() in g.naim_portala.lower()]
-
-    with TaskMonitor("PARSE_GOSZAKUP", process_run_id, business_date, "MSB_DB_KONTR_PARSE") as m:
-        counts = await _parse_and_stage(goszakup_parser, goszakup_rows)
-        m.rows_processed = len(goszakup_rows)
-        m.extra_info = {"portal": "goszakup", **counts}
+    goszakup_rows = [g for g in gaps if Portal.GOSZAKUP.value.lower() in g.naim_portala.lower()]
 
     with TaskMonitor("PARSE_SAMRUK", process_run_id, business_date, "MSB_DB_KONTR_PARSE") as m:
         counts = await _parse_and_stage(samruk_parser, samruk_rows)
         m.rows_processed = len(samruk_rows)
         m.extra_info = {"portal": "samruk", **counts}
+
+    with TaskMonitor("PARSE_GOSZAKUP", process_run_id, business_date, "MSB_DB_KONTR_PARSE") as m:
+        counts = await _parse_and_stage(goszakup_parser, goszakup_rows)
+        m.rows_processed = len(goszakup_rows)
+        m.extra_info = {"portal": "goszakup", **counts}
 
     with TaskMonitor("UPDATE_TARGET_TABLE", process_run_id, business_date, "MSB_DB_GRN_BLANK_MONITOR") as m:
         merged = target_repo.merge_from_staging(process_run_id)

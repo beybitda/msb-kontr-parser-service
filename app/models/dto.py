@@ -40,6 +40,7 @@ class GapRow:
     nomer_kontrakta_norm: str | None
     naim_portala: str
     ord_id: int | None
+    dep_id: int | None
     attempt_number: int = 0
 
 

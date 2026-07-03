@@ -6,7 +6,6 @@ from pydantic import BaseModel, Field
 class TriggerRequest(BaseModel):
     """Тело запроса от Informatica (post-session success command)."""
 
-    process_run_id: str = Field(..., description="workflow_run_id Informatica, сквозной идентификатор запуска сервиса")
     business_date: date = Field(..., description="бизнес-дата загрузки витрины")
     target_table: str = Field(default="MSB_DB_GRN_BLANK_MONITOR")
 

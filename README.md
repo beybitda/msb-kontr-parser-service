@@ -63,7 +63,7 @@ Post-session success command (пример):
 curl -s -X POST http://<service-host>:8000/parser/trigger \
   -H "Content-Type: application/json" \
   -H "X-API-Key: $PARSER_API_KEY" \
-  -d "{\"process_run_id\": \"$PMWorkflowRunId\", \"business_date\": \"$BusinessDate\"}"
+  -d "{\"business_date\": \"$BusinessDate\"}"
 ```
 
 ## Тесты

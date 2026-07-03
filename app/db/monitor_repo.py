@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import date
 
+from app.core.config import get_settings
 from app.db.connection import get_connection
 from app.models.dto import MonitorStatus, ProcessType
 
@@ -49,8 +50,9 @@ ORDER BY START_TIME
 _ALREADY_RUNNING_SQL = """
 SELECT STATUS_NAME, COUNT(*)
 FROM ANALYST_MSB2.MSB_DB_PROCESS_MONITOR
-WHERE PROCESS_RUN_ID = :process_run_id
-  AND PROCESS_TYPE = 'SERVICE'
+WHERE BUSINESS_DATE = :business_date
+  AND PROCESS_NAME  = :process_name
+  AND PROCESS_TYPE  = 'SERVICE'
 GROUP BY STATUS_NAME
 """
 
@@ -107,13 +109,13 @@ def log_end(
         logger.info("MONITOR END run_id=%s status=%s rows=%s", run_id, status_name.value, rows_processed)
 
 
-def already_running(process_run_id: str) -> str | None:
-    """Возвращает статус, если по process_run_id уже есть строки сервиса
-    в состоянии RUNNING или все шаги завершены SUCCESS. Иначе None
-    (можно стартовать новый прогон / это первый вызов)."""
+def already_running(business_date: date, process_name: str) -> str | None:
+    """Возвращает статус, если для этой business_date уже есть строки
+    сервиса в состоянии RUNNING или все шаги завершены SUCCESS. Иначе
+    None (можно стартовать новый прогон с новым process_run_id)."""
     with get_connection() as conn:
         cur = conn.cursor()
-        cur.execute(_ALREADY_RUNNING_SQL, {"process_run_id": process_run_id})
+        cur.execute(_ALREADY_RUNNING_SQL, {"business_date": business_date, "process_name": process_name})
         rows = cur.fetchall()
         if not rows:
             return None
