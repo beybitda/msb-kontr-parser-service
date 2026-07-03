@@ -1,0 +1,36 @@
+# --- Env / secrets ---
+.env
+.env.*
+!.env.example
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+build/
+dist/
+
+# --- Test / coverage ---
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# --- Logs / debug artifacts ---
+*.log
+tests/fixtures/*.debug
+
+# --- OS / editor ---
+.DS_Store
+.idea/
+.vscode/
+
+# --- Docker ---
+oracle-dev-data/
