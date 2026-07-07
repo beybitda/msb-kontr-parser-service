@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     max_attempts: int = 5
 
     goszakup_base_url: str = "https://goszakup.gov.kz/ru/registry/contract"
+    goszakup_detail_url_template: str = "https://goszakup.gov.kz/ru/egzcontract/cpublic/show/{id}"
+    goszakup_search_count_record: int = 50
+    
     samruk_base_url: str = "https://zakup.sk.kz/#/ext?tabs=contractCard&page=1"
 
     # --- Прочее ---
