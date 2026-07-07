@@ -77,3 +77,35 @@ async def run(process_run_id: str, business_date: date) -> None:
     with TaskMonitor("UPDATE_TARGET_TABLE", process_run_id, business_date, "MSB_DB_GRN_BLANK_MONITOR") as m:
         merged = target_repo.merge_from_staging(process_run_id)
         m.rows_processed = merged
+
+
+async def run_single(process_run_id: str, business_date: date, row: GapRow) -> ParseResult:
+    """Парсинг одного контракта в обход GAP_ANALYSIS. Один шаг мониторинга,
+    результат сразу пишется в MSB_DB_KONTR_PARSE. UPDATE_TARGET_TABLE
+    (merge в MSB_DB_GRN_BLANK_MONITOR) сознательно не вызывается."""
+    settings = get_settings()
+    portal_lower = row.naim_portala.lower()
+
+    if Portal.SAMRUK.value.lower() in portal_lower:
+        parser: ParserAdapter = samruk_parser
+    elif Portal.GOSZAKUP.value.lower() in portal_lower:
+        parser = goszakup_parser
+    else:
+        raise ValueError(f"Unknown naim_portala: {row.naim_portala!r}")
+
+    with TaskMonitor("PARSE_SINGLE_CONTRACT", process_run_id, business_date, "MSB_DB_KONTR_PARSE") as m:
+        parse_repo.mark_in_progress(row.kontr_id)
+        try:
+            result = await parser.parse(row)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Single parse failed for kontr_id=%s", row.kontr_id)
+            result = ParseResult(kontr_id=row.kontr_id, status_name=StatusName.ERROR, error_message=str(exc))
+
+        final_status = parse_repo.status_or_not_found(result.status_name, row.attempt_number, settings.max_attempts)
+        result.status_name = final_status
+        parse_repo.save_result(result)
+
+        m.rows_processed = 1
+        m.extra_info = {"portal": parser.portal_name, "kontr_id": row.kontr_id, "status": final_status.value}
+
+    return result

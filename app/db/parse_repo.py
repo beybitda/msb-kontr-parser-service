@@ -28,6 +28,28 @@ SET STATUS_NAME = 'IN_PROGRESS', UPDATED_AT = SYSTIMESTAMP
 WHERE KONTR_ID = :kontr_id
 """
 
+_SELECT_BY_NOMER_SQL = """
+SELECT KONTR_ID FROM ANALYST_MSB2.MSB_DB_KONTR_PARSE WHERE NOMER_KONTRAKTA = :nomer
+"""
+
+_INSERT_SINGLE_SQL = """
+INSERT INTO ANALYST_MSB2.MSB_DB_KONTR_PARSE (
+    KONTR_ID, NOMER_KONTRAKTA, NOMER_KONTRAKTA_NORM, NAIM_PORTALA, ORD_ID, DEP_ID,
+    STATUS_NAME, ATTEMPT_NUMBER, PROCESS_RUN_ID, INSERTED_AT, UPDATED_AT
+) VALUES (
+    ANALYST_MSB2.SEQ_KONTR_PARSE.NEXTVAL, :nomer, :nomer_norm, :portal, :ord_id, :dep_id,
+    'NEW', 0, :process_run_id, SYSTIMESTAMP, SYSTIMESTAMP
+) RETURNING KONTR_ID INTO :kontr_id
+"""
+
+_REUSE_SINGLE_SQL = """
+UPDATE ANALYST_MSB2.MSB_DB_KONTR_PARSE
+SET PROCESS_RUN_ID = :process_run_id,
+    STATUS_NAME = 'NEW',
+    UPDATED_AT = SYSTIMESTAMP
+WHERE KONTR_ID = :kontr_id
+"""
+
 
 def mark_in_progress(kontr_id: int) -> None:
     with get_connection() as conn:
@@ -83,3 +105,42 @@ def status_or_not_found(status_name: StatusName, attempt_number: int, max_attemp
     if status_name in (StatusName.ERROR, StatusName.NOT_FOUND) and attempt_number + 1 >= max_attempts:
         return StatusName.NOT_FOUND
     return status_name
+
+
+def get_or_create_kontr_id(
+    nomer: str,
+    nomer_norm: str | None,
+    portal: str,
+    ord_id: int | None,
+    dep_id: int | None,
+    process_run_id: str,
+) -> int:
+    """Для ручного /parser/parse-one: переиспользует существующую строку
+    по NOMER_KONTRAKTA (сбрасывая STATUS_NAME в NEW) либо заводит новую.
+    Без GAP_ANALYSIS и без ATTEMPT_NUMBER-лимитов — это ручной триггер."""
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(_SELECT_BY_NOMER_SQL, {"nomer": nomer})
+        row = cur.fetchone()
+        if row:
+            kontr_id = int(row[0])
+            cur.execute(_REUSE_SINGLE_SQL, {"process_run_id": process_run_id, "kontr_id": kontr_id})
+            logger.info("PARSE_SINGLE reuse kontr_id=%s nomer=%s", kontr_id, nomer)
+            return kontr_id
+
+        kontr_id_var = cur.var(int)
+        cur.execute(
+            _INSERT_SINGLE_SQL,
+            {
+                "nomer": nomer,
+                "nomer_norm": nomer_norm,
+                "portal": portal,
+                "ord_id": ord_id,
+                "dep_id": dep_id,
+                "process_run_id": process_run_id,
+                "kontr_id": kontr_id_var,
+            },
+        )
+        kontr_id = int(kontr_id_var.getvalue()[0])
+        logger.info("PARSE_SINGLE created kontr_id=%s nomer=%s", kontr_id, nomer)
+        return kontr_id

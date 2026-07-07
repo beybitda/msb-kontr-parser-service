@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 
 from pydantic import BaseModel, Field
 
@@ -33,3 +33,23 @@ class RunStatusResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str = "ok"
+
+
+class SingleParseRequest(BaseModel):
+    """Ручной запуск парсинга одного контракта, без GAP_ANALYSIS и без
+    последующего merge в витрину."""
+
+    nomer_kontrakta: str
+    naim_portala: str  # должно содержать "Гос" или "Самрук" (см. Portal enum)
+    ord_id: int | None = None
+    dep_id: int | None = None
+
+
+class SingleParseResponse(BaseModel):
+    kontr_id: int
+    status_name: str
+    kontr_data_start: datetime | None = None
+    kontr_data_end: datetime | None = None
+    kontr_stat: str | None = None
+    parse_source_url: str | None = None
+    error_message: str | None = None
