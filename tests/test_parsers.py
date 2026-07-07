@@ -1,5 +1,5 @@
 import asyncio
-from datetime import date
+from datetime import datetime
 
 import pytest
 
@@ -43,11 +43,11 @@ def test_goszakup_parser_not_found_when_search_has_no_results(monkeypatch) -> No
 
     monkeypatch.setattr(parser, "_search", fake_search)
 
-    row = GapRow(kontr_id=2, nomer_kontrakta="130140023286/250002/00", nomer_kontrakta_norm="130140023286/250002/00", naim_portala="Гос. Закупки", ord_id=3537408323, dep_id=10306)
+    row = GapRow(kontr_id=1, nomer_kontrakta="123-45", nomer_kontrakta_norm="123-45", naim_portala="Госзакупки", ord_id=1, dep_id=None)
     result = asyncio.run(parser.parse(row))
 
     assert result.status_name == StatusName.NOT_FOUND
-    assert result.kontr_id == 2
+    assert result.kontr_id == 1
 
 
 def test_goszakup_parser_done_with_single_main_contract(monkeypatch) -> None:
@@ -62,8 +62,8 @@ def test_goszakup_parser_done_with_single_main_contract(monkeypatch) -> None:
             "id": contract_id,
             "url": f"https://goszakup.gov.kz/ru/egzcontract/cpublic/show/{contract_id}",
             "type": "Основной договор",
-            "kontr_data_start": date(2026, 2, 20),
-            "kontr_data_end": date(2026, 12, 31),
+            "kontr_data_start": datetime(2026, 2, 20, 11, 49, 39),
+            "kontr_data_end": datetime(2026, 12, 31, 0, 0, 0),
             "kontr_stat": "Действует",
         }
 
@@ -81,8 +81,8 @@ def test_goszakup_parser_done_with_single_main_contract(monkeypatch) -> None:
     result = asyncio.run(parser.parse(row))
 
     assert result.status_name == StatusName.DONE
-    assert result.kontr_data_start == date(2026, 2, 20)
-    assert result.kontr_data_end == date(2026, 12, 31)
+    assert result.kontr_data_start == datetime(2026, 2, 20, 11, 49, 39)
+    assert result.kontr_data_end == datetime(2026, 12, 31, 0, 0, 0)
     assert result.kontr_stat == "Действует"
     assert "24694320" in result.raw_response
 
@@ -102,16 +102,16 @@ def test_goszakup_parser_picks_main_contract_among_several_matches(monkeypatch) 
                 "id": 111,
                 "url": "https://goszakup.gov.kz/ru/egzcontract/cpublic/show/111",
                 "type": "Основной договор",
-                "kontr_data_start": date(2026, 1, 1),
-                "kontr_data_end": date(2026, 12, 31),
+                "kontr_data_start": datetime(2026, 1, 1, 0, 0, 0),
+                "kontr_data_end": datetime(2026, 12, 31, 0, 0, 0),
                 "kontr_stat": "Изменен",
             }
         return {
             "id": 222,
             "url": "https://goszakup.gov.kz/ru/egzcontract/cpublic/show/222",
             "type": "Дополнительное соглашение",
-            "kontr_data_start": date(2026, 6, 1),
-            "kontr_data_end": date(2026, 12, 31),
+            "kontr_data_start": datetime(2026, 6, 1, 0, 0, 0),
+            "kontr_data_end": datetime(2026, 12, 31, 0, 0, 0),
             "kontr_stat": "Создано доп.соглашение",
         }
 
@@ -123,5 +123,5 @@ def test_goszakup_parser_picks_main_contract_among_several_matches(monkeypatch) 
 
     assert result.status_name == StatusName.DONE
     assert result.kontr_stat == "Изменен"
-    assert result.kontr_data_start == date(2026, 1, 1)
+    assert result.kontr_data_start == datetime(2026, 1, 1, 0, 0, 0)
     assert "222" in result.raw_response  # доп. соглашение тоже сохранено

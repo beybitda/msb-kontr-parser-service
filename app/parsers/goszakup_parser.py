@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import date, datetime
+from datetime import datetime
 
 import httpx
 from bs4 import BeautifulSoup
@@ -25,14 +25,16 @@ _STATUS_LABEL = "Статус договора"
 _MAIN_CONTRACT_TYPE = "Основной договор"
 
 
-def _parse_ru_date(value: str | None) -> date | None:
-   """'2026-02-20 11:49:39' / '2026-12-31' -> date, иначе None."""
+def _parse_ru_date(value: str | None) -> datetime | None:
+   """'2026-02-20 11:49:39' -> datetime(2026, 2, 20, 11, 49, 39)
+   '2026-12-31' (только дата, без времени) -> datetime(2026, 12, 31, 0, 0, 0)
+   иначе None."""
    value = (value or "").strip()
    if not value:
       return None
    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
       try:
-         return datetime.strptime(value, fmt).date()
+         return datetime.strptime(value, fmt)
       except ValueError:
          continue
    logger.warning("Не удалось распарсить дату goszakup: %r", value)
@@ -146,7 +148,7 @@ class GoszakupParser(ParserAdapter):
       main = next((d for d in details if d["type"] == _MAIN_CONTRACT_TYPE), None)
       if main is not None:
          return main
-      return max(details, key=lambda d: d["kontr_data_start"] or date.min)
+      return max(details, key=lambda d: d["kontr_data_start"] or datetime.min)
 
    @staticmethod
    def _serialize_details(details: list[dict]) -> str:

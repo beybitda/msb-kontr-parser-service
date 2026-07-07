@@ -50,8 +50,8 @@ class ParseResult:
 
     kontr_id: int
     status_name: StatusName
-    kontr_data_start: date | None = None
-    kontr_data_end: date | None = None
+    kontr_data_start: datetime | None = None
+    kontr_data_end: datetime | None = None
     kontr_stat: str | None = None
     parse_source_url: str | None = None
     raw_response: str | None = None
