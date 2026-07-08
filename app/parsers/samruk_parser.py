@@ -204,22 +204,27 @@ class SamrukParser(ParserAdapter):
             except Exception:  # noqa: BLE001 — попап не поймали отдельным селектором, читаем что есть
                 logger.warning("Samruk popup selector not matched for cid=%s", cid)
 
-            body_text = await page.locator("body").inner_text()
-
+            # count()+loop берёт снимок DOM в один момент и не ждёт —
+            # содержимое попапа может дозагрузиться уже ПОСЛЕ того, как
+            # сам диалог стал visible (Angular тянет данные вкладки
+            # отдельным запросом). Поэтому здесь — locator с has_text и
+            # явным wait_for, который сам ретраит до таймаута.
             kontr_data_end: datetime | None = None
-            infoblocks = page.locator(".m-infoblock__layout")
-            for i in range(await infoblocks.count()):
-                block = infoblocks.nth(i)
-                title_loc = block.locator(".m-infoblock__title")
-                if await title_loc.count() == 0:
-                    continue
-                title_text = await title_loc.inner_text()
-                if "Срок действия договора" not in title_text:
-                    continue
+            end_title_loc = page.locator(".m-infoblock__title", has_text="Срок действия договора")
+            try:
+                await end_title_loc.first.wait_for(state="visible", timeout=15000)
+                title_text = await end_title_loc.first.inner_text()
+                block = end_title_loc.first.locator("xpath=..")  # родитель .m-infoblock__layout
                 full_text = await block.inner_text()
                 value_text = full_text.replace(title_text, "", 1).strip()
                 kontr_data_end = _parse_dmy(value_text)
-                break
+            except Exception:  # noqa: BLE001 — блок не появился за таймаут, уйдём в запасной regex ниже
+                logger.warning("Samruk .m-infoblock__title (срок действия) not found for cid=%s", cid)
+
+            # читаем body ПОСЛЕ ожидания инфоблока — тем самым title/status
+            # (регексом ниже) тоже получают дополнительное время на отрисовку,
+            # а не читаются раньше, чем поле, которое как раз не находилось
+            body_text = await page.locator("body").inner_text()
         finally:
             await context.close()
 
