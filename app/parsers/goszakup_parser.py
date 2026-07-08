@@ -13,6 +13,8 @@ from app.models.dto import GapRow, ParseResult, StatusName
 from app.parsers.base import ParserAdapter
 
 logger = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 # Ссылки на карточку договора в реестре имеют вид
 # https://goszakup.gov.kz/ru/egzcontract/cpublic/show/24694320
