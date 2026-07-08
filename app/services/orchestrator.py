@@ -7,7 +7,7 @@ from datetime import date
 
 from app.core.config import get_settings
 from app.db import gap_repo, parse_repo, target_repo
-from app.models.dto import GapRow, Portal, StatusName
+from app.models.dto import GapRow, ParseResult, Portal, StatusName
 from app.parsers.base import ParserAdapter
 from app.parsers.goszakup_parser import GoszakupParser
 from app.parsers.samruk_parser import SamrukParser
@@ -31,7 +31,6 @@ async def _parse_and_stage(parser: ParserAdapter, rows: list[GapRow]) -> dict:
             result = await parser.parse(row)
         except Exception as exc:  # noqa: BLE001 — сбой одного контракта не должен ронять весь батч
             logger.exception("Parse failed for kontr_id=%s", row.kontr_id)
-            from app.models.dto import ParseResult
 
             result = ParseResult(kontr_id=row.kontr_id, status_name=StatusName.ERROR, error_message=str(exc))
 
