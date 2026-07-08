@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     parser_api_key: str
 
     # --- Парсинг (заготовка на будущее, сейчас парсеры не реализованы) ---
-    request_timeout_sec: float = 15.0
+    request_timeout_sec: float = 60.0
     request_delay_min_sec: float = 0.5
     request_delay_max_sec: float = 2.0
     max_attempts: int = 5
