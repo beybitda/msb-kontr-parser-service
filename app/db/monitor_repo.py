@@ -48,13 +48,27 @@ ORDER BY START_TIME
 """
 
 _ALREADY_RUNNING_SQL = """
-SELECT STATUS_NAME, COUNT(*)
-FROM ANALYST_MSB2.MSB_DB_PROCESS_MONITOR
-WHERE BUSINESS_DATE = :business_date
-  AND PROCESS_NAME  = :process_name
-  AND PROCESS_TYPE  = 'SERVICE'
-GROUP BY STATUS_NAME
+SELECT TASK_NAME, STATUS_NAME
+FROM (
+    SELECT TASK_NAME, STATUS_NAME,
+           ROW_NUMBER() OVER (PARTITION BY TASK_NAME ORDER BY START_TIME DESC) AS rn
+    FROM ANALYST_MSB2.MSB_DB_PROCESS_MONITOR
+    WHERE BUSINESS_DATE = :business_date
+      AND PROCESS_NAME  = :process_name
+      AND PROCESS_TYPE  = 'SERVICE'
+      AND TASK_NAME != 'PARSE_SINGLE_CONTRACT'
+) latest
+WHERE rn = 1
 """
+
+# Полный набор шагов run() (без PARSE_SINGLE_CONTRACT — тот принадлежит
+# /parser/parse-one и не участвует в идемпотентности /parser/trigger).
+_EXPECTED_TASK_NAMES = frozenset({
+    "GAP_ANALYSIS",
+    "PARSE_GOSZAKUP",
+    "PARSE_SAMRUK",
+    "UPDATE_TARGET_TABLE",
+})
 
 
 def log_start(
@@ -110,20 +124,29 @@ def log_end(
 
 
 def already_running(business_date: date, process_name: str) -> str | None:
-    """Возвращает статус, если для этой business_date уже есть строки
-    сервиса в состоянии RUNNING или все шаги завершены SUCCESS. Иначе
-    None (можно стартовать новый прогон с новым process_run_id)."""
+    """Возвращает статус для business_date по последнему прогону КАЖДОЙ
+    задачи (PARSE_SINGLE_CONTRACT игнорируется — это ручной параллельный
+    путь, а не шаг основного пайплайна):
+      - RUNNING, если хоть одна задача сейчас RUNNING;
+      - SUCCESS, только если присутствуют ВСЕ ожидаемые задачи
+        (_EXPECTED_TASK_NAMES) и у каждой последний статус SUCCESS;
+      - иначе None (можно стартовать новый прогон)."""
     with get_connection() as conn:
         cur = conn.cursor()
         cur.execute(_ALREADY_RUNNING_SQL, {"business_date": business_date, "process_name": process_name})
         rows = cur.fetchall()
         if not rows:
             return None
-        statuses = {r[0] for r in rows}
+
+        latest_status_by_task = {task_name: status_name for task_name, status_name in rows}
+        statuses = set(latest_status_by_task.values())
+
         if "RUNNING" in statuses:
             return "RUNNING"
-        if statuses == {"SUCCESS"}:
+
+        if _EXPECTED_TASK_NAMES.issubset(latest_status_by_task.keys()) and statuses == {"SUCCESS"}:
             return "SUCCESS"
+        
         return None
 
 
