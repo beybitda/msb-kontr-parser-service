@@ -172,7 +172,26 @@ class SamrukParser(ParserAdapter):
         return ids
 
     async def _fetch_detail(self, cid: int) -> dict:
-        """Открывает попап карточки договора и вытаскивает поля из его текста."""
+        """Открывает попап карточки договора и вытаскивает поля.
+
+        Тип/№/дата начала ("Основной договор № ... от ...") и статус
+        рендерятся в карточке списка результатов (классы m-found-item__*),
+        которая остаётся в DOM позади попапа (Angular Material диалог
+        накладывается поверх, а не заменяет страницу) — поэтому они
+        читаются из текста всей страницы. Дата окончания — из блока
+        попапа .m-infoblock__layout с заголовком "Срок действия
+        договора", извлекается через селектор (надёжнее регекса по
+        всему тексту, т.к. в разметке может быть несколько дат/блоков).
+
+        ВАЖНО (не проверено на реальной странице): если по системному
+        номеру находится несколько договоров (основной + доп.
+        соглашения), под попапом в списке останутся видны ВСЕ найденные
+        карточки — регекс по body_text возьмёт первое совпадение
+        "Статус", что не обязательно относится к текущему cid. Если
+        статус будет "перескакивать" между договорами одного номера —
+        нужно сузить поиск до конкретной .m-found-item карточки с
+        этим cid, а не читать весь body.
+        """
         url = self._DETAIL_URL_TMPL.format(cid=cid)
         context = await self._new_context()
         try:
@@ -180,27 +199,43 @@ class SamrukParser(ParserAdapter):
             if not await self._goto_with_retry(page, url):
                 raise RuntimeError(f"Не удалось загрузить карточку договора: {url}")
 
-            popup = page.locator(_POPUP_SELECTOR)
             try:
-                await popup.first.wait_for(state="visible", timeout=15000)
-                text = await popup.first.inner_text()
-            except Exception:  # noqa: BLE001 — попап не поймали отдельным селектором,
-                # берём текст всей страницы как запасной вариант
-                logger.warning("Samruk popup selector not matched for cid=%s, falling back to body text", cid)
-                text = await page.locator("body").inner_text()
+                await page.locator(_POPUP_SELECTOR).first.wait_for(state="visible", timeout=15000)
+            except Exception:  # noqa: BLE001 — попап не поймали отдельным селектором, читаем что есть
+                logger.warning("Samruk popup selector not matched for cid=%s", cid)
+
+            body_text = await page.locator("body").inner_text()
+
+            kontr_data_end: datetime | None = None
+            infoblocks = page.locator(".m-infoblock__layout")
+            for i in range(await infoblocks.count()):
+                block = infoblocks.nth(i)
+                title_loc = block.locator(".m-infoblock__title")
+                if await title_loc.count() == 0:
+                    continue
+                title_text = await title_loc.inner_text()
+                if "Срок действия договора" not in title_text:
+                    continue
+                full_text = await block.inner_text()
+                value_text = full_text.replace(title_text, "", 1).strip()
+                kontr_data_end = _parse_dmy(value_text)
+                break
         finally:
             await context.close()
 
-        title_match = _TITLE_RE.search(text)
-        end_match = _END_DATE_RE.search(text)
-        status_match = _STATUS_RE.search(text)
+        title_match = _TITLE_RE.search(body_text)
+        status_match = _STATUS_RE.search(body_text)
+        if kontr_data_end is None:
+            # запасной путь, если .m-infoblock__layout не нашёлся / сменилась вёрстка
+            end_match = _END_DATE_RE.search(body_text)
+            kontr_data_end = _parse_dmy(end_match.group(1)) if end_match else None
 
         return {
             "id": cid,
             "url": url,
             "type": title_match.group(1) if title_match else None,
             "kontr_data_start": _parse_dmy(title_match.group("date")) if title_match else None,
-            "kontr_data_end": _parse_dmy(end_match.group(1)) if end_match else None,
+            "kontr_data_end": kontr_data_end,
             "kontr_stat": status_match.group(1).strip() if status_match else None,
         }
 
