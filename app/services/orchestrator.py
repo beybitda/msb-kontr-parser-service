@@ -50,9 +50,11 @@ async def _parse_and_stage(parser: ParserAdapter, rows: list[GapRow]) -> dict:
     return counts
 
 
-async def run(process_run_id: str, business_date: date) -> None:
+async def run(process_run_id: str, business_date: date, merge: bool = False) -> None:
     """Оркестрация всего пайплайна для одного process_run_id.
-    Каждый шаг = отдельная строка мониторинга (TASK_NAME)."""
+    Каждый шаг = отдельная строка мониторинга (TASK_NAME).
+    merge=False пропускает UPDATE_TARGET_TABLE (например, если merge
+    нужно прогнать отдельно/позже через /parser/merge)."""
     settings = get_settings()
 
     with TaskMonitor("GAP_ANALYSIS", process_run_id, business_date, "MSB_DB_KONTR_PARSE") as m:
@@ -73,9 +75,10 @@ async def run(process_run_id: str, business_date: date) -> None:
         m.rows_processed = len(goszakup_rows)
         m.extra_info = {"portal": "goszakup", **counts}
 
-    with TaskMonitor("UPDATE_TARGET_TABLE", process_run_id, business_date, "MSB_DB_GRN_BLANK_MONITOR") as m:
-        merged = target_repo.merge_from_staging(process_run_id)
-        m.rows_processed = merged
+    if merge:
+        run_merge(process_run_id, business_date)
+    else:
+        logger.info("UPDATE_TARGET_TABLE skipped (merge=False) process_run_id=%s", process_run_id)
 
 
 async def run_single(process_run_id: str, business_date: date, row: GapRow) -> ParseResult:
@@ -108,3 +111,12 @@ async def run_single(process_run_id: str, business_date: date, row: GapRow) -> P
         m.extra_info = {"portal": parser.portal_name, "kontr_id": row.kontr_id, "status": final_status.value}
 
     return result
+
+
+def run_merge(process_run_id: str, business_date: date) -> int:
+    """UPDATE_TARGET_TABLE как отдельный, самостоятельно вызываемый шаг —
+    используется и из run() (merge=True), и напрямую из /parser/merge."""
+    with TaskMonitor("UPDATE_TARGET_TABLE", process_run_id, business_date, "MSB_DB_GRN_BLANK_MONITOR") as m:
+        merged = target_repo.merge_from_staging(process_run_id)
+        m.rows_processed = merged
+    return merged

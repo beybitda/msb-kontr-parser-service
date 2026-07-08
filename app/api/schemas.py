@@ -8,6 +8,7 @@ class TriggerRequest(BaseModel):
 
     business_date: date = Field(..., description="бизнес-дата загрузки витрины")
     target_table: str = Field(default="MSB_DB_GRN_BLANK_MONITOR")
+    merge: bool = Field(default=False, description="выполнять ли UPDATE_TARGET_TABLE в конце пайплайна")
 
 
 class TriggerResponse(BaseModel):
@@ -53,3 +54,16 @@ class SingleParseResponse(BaseModel):
     kontr_stat: str | None = None
     parse_source_url: str | None = None
     error_message: str | None = None
+
+
+class MergeRequest(BaseModel):
+    """Ручной запуск только UPDATE_TARGET_TABLE для уже готового
+    process_run_id (например, если /parser/trigger был вызван с merge=false)."""
+
+    process_run_id: str
+    business_date: date
+
+
+class MergeResponse(BaseModel):
+    process_run_id: str
+    rows_merged: int

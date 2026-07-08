@@ -8,6 +8,8 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
 from app.api.schemas import (
     HealthResponse,
+    MergeRequest,
+    MergeResponse,
     RunStatusResponse,
     SingleParseRequest,
     SingleParseResponse,
@@ -46,8 +48,11 @@ async def trigger(req: TriggerRequest, background_tasks: BackgroundTasks) -> Tri
             detail="pipeline already completed successfully for this process_run_id",
         )
 
-    background_tasks.add_task(orchestrator.run, process_run_id, req.business_date)
-    logger.info("Trigger accepted: process_run_id=%s business_date=%s", process_run_id, req.business_date)
+    background_tasks.add_task(orchestrator.run, process_run_id, req.business_date, req.merge)
+    logger.info(
+        "Trigger accepted: process_run_id=%s business_date=%s merge=%s",
+        process_run_id, req.business_date, req.merge,
+    )
     return TriggerResponse(status="ACCEPTED", process_run_id=process_run_id)
 
 
@@ -110,6 +115,16 @@ async def parse_one(req: SingleParseRequest) -> SingleParseResponse:
         parse_source_url=result.parse_source_url,
         error_message=result.error_message,
     )
+
+
+@router.post("/parser/merge", response_model=MergeResponse, dependencies=[Depends(verify_api_key)])
+async def merge(req: MergeRequest) -> MergeResponse:
+    """Ручной/отложенный запуск UPDATE_TARGET_TABLE для process_run_id,
+    для которого /parser/trigger вызывался с merge=false (либо merge
+    нужно перезапустить отдельно после ручного разбора ошибок)."""
+    rows = orchestrator.run_merge(req.process_run_id, req.business_date)
+    return MergeResponse(process_run_id=req.process_run_id, rows_merged=rows)
+
 
 @router.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
