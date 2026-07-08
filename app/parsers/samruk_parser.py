@@ -5,10 +5,9 @@ import json
 import logging
 import re
 from datetime import datetime
-from typing import List
 from urllib.parse import quote
 
-from playwright.async_api import Browser, BrowserContext, Playwright, async_playwright
+from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
 
 from app.core.config import get_settings
 from app.models.dto import GapRow, ParseResult, StatusName
@@ -27,6 +26,14 @@ _STATUS_RE = re.compile(r"Статус(?: договора)?\s*[:\-]?\s*([^\n]+)
 
 _MAIN_CONTRACT_TYPE = "Основной договор"
 
+# Селектор попапа карточки — из рабочего скрапера (scraper_card.py):
+# Angular Material диалог / модалка / кастомный компонент карточки.
+_POPUP_SELECTOR = ".mat-dialog-container, .modal-content, app-item-details"
+_SPINNER_SELECTOR = ".mat-progress-spinner, .loading-indicator"
+
+_NAV_MAX_RETRIES = 3
+_POST_NAV_WAIT_MS = 5000
+
 
 def _parse_dmy(value: str | None) -> datetime | None:
     if not value:
@@ -39,9 +46,16 @@ def _parse_dmy(value: str | None) -> datetime | None:
 
 
 class SamrukParser(ParserAdapter):
-    """Адаптер под https://zakup.sk.kz — Angular SPA, hash-роутинг,
-    открытого JSON API нет (в отличие от goszakup), поэтому парсинг идёт
-    headless-браузером (Playwright), а не httpx/BeautifulSoup.
+    """Адаптер под https://zakup.sk.kz — Angular SPA, hash-роутинг, открытого
+    JSON API нет, поэтому парсинг идёт headless-браузером (Playwright).
+
+    Важно (см. разбор рабочего скрапера terequelll/zakup-sk-scraper):
+    страница НИКОГДА не доходит до networkidle (постоянные фоновые
+    запросы/сокеты у Angular-приложения) — если ждать networkidle после
+    goto, он просто таймаутит и мы читаем страницу до того, как данные
+    отрисовались. Поэтому здесь используется тот же паттерн, что и в
+    рабочем скрапере: goto(wait_until="domcontentloaded") + фиксированная
+    пауза + явное ожидание попапа/спиннера, с ретраями.
 
     1. Поиск по системному номеру (row.nomer_kontrakta_norm):
        GET https://zakup.sk.kz/#/ext?tabs=contractCard&sn=<номер>&page=1
@@ -49,8 +63,7 @@ class SamrukParser(ParserAdapter):
     2. Карточка договора (попап):
        GET https://zakup.sk.kz/#/ext(popup:item/<cid>/contractCard)?tabs=contractCard&cid=<cid>&page=1
 
-    Поля вытаскиваются регулярками из отрендеренного текста страницы
-    (устойчивых CSS-селекторов не знаем — у Angular хэшированные классы):
+    Поля вытаскиваются регулярками из текста попапа:
       - "Основной договор № <N> от <DD.MM.YYYY>" / "Дополнительное
         соглашение № ... от ..." -> тип + KONTR_DATA_START
       - "Срок действия договора" -> KONTR_DATA_END
@@ -97,13 +110,28 @@ class SamrukParser(ParserAdapter):
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                 "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-            )
+            ),
+            ignore_https_errors=True,
         )
+
+    async def _goto_with_retry(self, page: Page, url: str) -> bool:
+        """domcontentloaded + фиксированная пауза даёт SPA-роутеру время
+        собрать компонент — как в рабочем скрапере. networkidle здесь не
+        используется намеренно (см. docstring класса)."""
+        timeout_ms = max(int(self._settings.request_timeout_sec * 1000), 60000)
+        for attempt in range(1, _NAV_MAX_RETRIES + 1):
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                await page.wait_for_timeout(_POST_NAV_WAIT_MS)
+                return True
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Samruk goto attempt %d/%d failed for %s: %s", attempt, _NAV_MAX_RETRIES, url, exc)
+                await page.wait_for_timeout(3000)
+        return False
 
     async def _search(self, nomer_kontrakta_norm: str) -> list[int]:
         """Возвращает cid договоров, найденных по системному номеру
         (в порядке появления на странице)."""
-        timeout_ms = self._settings.request_timeout_sec * 1000
         url = self._SEARCH_URL_TMPL.format(sn=quote(nomer_kontrakta_norm, safe=""))
         context = await self._new_context()
 
@@ -111,38 +139,55 @@ class SamrukParser(ParserAdapter):
         seen: set[int] = set()
         try:
             page = await context.new_page()
-            await page.goto(url, timeout=timeout_ms)
-            await page.wait_for_load_state("networkidle", timeout=timeout_ms)
-            # small delay to allow SPA lists render
+            if not await self._goto_with_retry(page, url):
+                raise RuntimeError(f"Не удалось загрузить страницу поиска: {url}")
+
+            try:
+                await page.wait_for_selector(_SPINNER_SELECTOR, state="hidden", timeout=5000)
+            except Exception:  # noqa: BLE001 — спиннера может не быть вовсе
+                pass
+            # небольшая доп. пауза на отрисовку списка SPA
             await page.wait_for_timeout(1500)
 
-            item_nums: List[str] = await page.locator(".m-found-item__num").evaluate_all("els => els.map(e => e.innerText || '')")
+            # запасной путь: карточки результатов поиска (класс из рабочего
+            # скрапера), на случай если ссылка не содержит /contractCard/
+            item_nums: list[str] = await page.locator(".m-found-item__num").evaluate_all(
+                "els => els.map(e => e.innerText || '')"
+            )
             for t in item_nums:
                 mm = re.search(r"([0-9]{6,})", t)
-                cid = mm.group(1)
-                if mm and cid not in seen:
+                if not mm:
+                    continue
+                cid = int(mm.group(1))
+                if cid not in seen:
                     seen.add(cid)
                     ids.append(cid)
 
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.exception("Samruk search error for nomer_kontrakta_norm=%s", nomer_kontrakta_norm)
             raise ValueError(f"Playwright error during search: {exc}") from exc
         finally:
             await context.close()
-            
+        
         return ids
 
     async def _fetch_detail(self, cid: int) -> dict:
-        """Открывает попап карточки договора и вытаскивает поля из
-        отрендеренного текста страницы."""
-        timeout_ms = self._settings.request_timeout_sec * 1000
+        """Открывает попап карточки договора и вытаскивает поля из его текста."""
         url = self._DETAIL_URL_TMPL.format(cid=cid)
         context = await self._new_context()
         try:
             page = await context.new_page()
-            await page.goto(url, timeout=timeout_ms)
-            await page.wait_for_load_state("networkidle", timeout=timeout_ms)
-            text = await page.inner_text("body")
+            if not await self._goto_with_retry(page, url):
+                raise RuntimeError(f"Не удалось загрузить карточку договора: {url}")
+
+            popup = page.locator(_POPUP_SELECTOR)
+            try:
+                await popup.first.wait_for(state="visible", timeout=15000)
+                text = await popup.first.inner_text()
+            except Exception:  # noqa: BLE001 — попап не поймали отдельным селектором,
+                # берём текст всей страницы как запасной вариант
+                logger.warning("Samruk popup selector not matched for cid=%s, falling back to body text", cid)
+                text = await page.locator("body").inner_text()
         finally:
             await context.close()
 
