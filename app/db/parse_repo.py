@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 
 from app.db.connection import get_connection
-from app.models.dto import ParseResult, StatusName
+from app.models.dto import GapRow, ParseResult, StatusName
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,25 @@ SET PROCESS_RUN_ID = :process_run_id,
     STATUS_NAME = 'NEW',
     UPDATED_AT = SYSTIMESTAMP
 WHERE KONTR_ID = :kontr_id
+"""
+
+_COUNT_NOT_FOUND_SQL = """
+SELECT COUNT(*) FROM ANALYST_MSB2.MSB_DB_KONTR_PARSE WHERE STATUS_NAME = 'NOT_FOUND'
+"""
+
+_SELECT_NOT_FOUND_SQL = """
+SELECT KONTR_ID, NOMER_KONTRAKTA, NOMER_KONTRAKTA_NORM, NAIM_PORTALA, ORD_ID, DEP_ID
+FROM ANALYST_MSB2.MSB_DB_KONTR_PARSE
+WHERE STATUS_NAME = 'NOT_FOUND'
+"""
+
+_REQUEUE_NOT_FOUND_SQL = """
+UPDATE ANALYST_MSB2.MSB_DB_KONTR_PARSE
+SET STATUS_NAME = 'NEW',
+    ATTEMPT_NUMBER = 0,
+    PROCESS_RUN_ID = :process_run_id,
+    UPDATED_AT = SYSTIMESTAMP
+WHERE STATUS_NAME = 'NOT_FOUND'
 """
 
 
@@ -144,3 +163,41 @@ def get_or_create_kontr_id(
         kontr_id = int(kontr_id_var.getvalue()[0])
         logger.info("PARSE_SINGLE created kontr_id=%s nomer=%s", kontr_id, nomer)
         return kontr_id
+
+
+def count_not_found() -> int:
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(_COUNT_NOT_FOUND_SQL)
+        return int(cur.fetchone()[0])
+
+
+def fetch_and_requeue_not_found(process_run_id: str) -> list[GapRow]:
+    """Забирает все записи STATUS_NAME='NOT_FOUND', атомарно сбрасывает их
+    в NEW/ATTEMPT_NUMBER=0 под текущим process_run_id и возвращает как
+    GapRow для повторного парсинга. SELECT и UPDATE выполняются в одной
+    транзакции get_connection(), но без FOR UPDATE — при параллельном
+    вызове /parser/rerun-not-found возможна гонка (см. already_running
+    проверку в эндпоинте, которая должна её предотвращать на уровне API)."""
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(_SELECT_NOT_FOUND_SQL)
+        rows = cur.fetchall()
+        if not rows:
+            return []
+
+        cur.execute(_REQUEUE_NOT_FOUND_SQL, {"process_run_id": process_run_id})
+        logger.info("RERUN_NOT_FOUND requeued=%d process_run_id=%s", len(rows), process_run_id)
+
+        return [
+            GapRow(
+                kontr_id=kontr_id,
+                nomer_kontrakta=nomer,
+                nomer_kontrakta_norm=nomer_norm,
+                naim_portala=naim_portala,
+                ord_id=ord_id,
+                dep_id=dep_id,
+                attempt_number=0,
+            )
+            for kontr_id, nomer, nomer_norm, naim_portala, ord_id, dep_id in rows
+        ]

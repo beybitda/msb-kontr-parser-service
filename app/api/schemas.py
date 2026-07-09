@@ -89,3 +89,17 @@ class MergeRequest(BaseModel):
 class MergeResponse(BaseModel):
     process_run_id: str
     rows_merged: int
+
+
+class RerunNotFoundRequest(BaseModel):
+    """Ручной повторный запуск парсинга для всех записей MSB_DB_KONTR_PARSE
+    со STATUS_NAME='NOT_FOUND' (например, контракт наконец появился на портале)."""
+
+    business_date: date = Field(..., description="бизнес-дата для строки мониторинга и already_running-проверки")
+
+
+class RerunNotFoundResponse(BaseModel):
+    status: str  # ACCEPTED | ALREADY_RUNNING | NOTHING_TO_RERUN
+    process_run_id: str
+    not_found_count: int
+    detail: str | None = None

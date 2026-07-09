@@ -162,3 +162,21 @@ def run_merge(process_run_id: str, business_date: date) -> int:
         merged = target_repo.merge_from_staging(process_run_id)
         m.rows_processed = merged
     return merged
+
+
+async def run_rerun_not_found(process_run_id: str, business_date: date) -> None:
+    """Повторный парсинг всех записей STATUS_NAME='NOT_FOUND': сбрасывает их
+    в NEW (parse_repo.fetch_and_requeue_not_found), парсит заново
+    сгруппировав по порталу, под одним шагом мониторинга RERUN_NOT_FOUND.
+    UPDATE_TARGET_TABLE не запускается — при необходимости merge делается
+    отдельно через /parser/merge."""
+    with TaskMonitor("RERUN_NOT_FOUND", process_run_id, business_date, "MSB_DB_KONTR_PARSE") as m:
+        rows = parse_repo.fetch_and_requeue_not_found(process_run_id)
+        samruk_rows = [g for g in rows if Portal.SAMRUK.value.lower() in g.naim_portala.lower()]
+        goszakup_rows = [g for g in rows if Portal.GOSZAKUP.value.lower() in g.naim_portala.lower()]
+
+        samruk_counts, _ = await _parse_and_stage(samruk_parser, samruk_rows)
+        goszakup_counts, _ = await _parse_and_stage(goszakup_parser, goszakup_rows)
+
+        m.rows_processed = len(rows)
+        m.extra_info = {"samruk": samruk_counts, "goszakup": goszakup_counts}

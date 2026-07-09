@@ -18,6 +18,8 @@ from app.api.schemas import (
     TaskStatus,
     TriggerRequest,
     TriggerResponse,
+    RerunNotFoundRequest,
+    RerunNotFoundResponse,
 )
 from app.core.config import get_settings
 from app.core.security import verify_api_key
@@ -179,6 +181,41 @@ async def merge(req: MergeRequest) -> MergeResponse:
     нужно перезапустить отдельно после ручного разбора ошибок)."""
     rows = orchestrator.run_merge(req.process_run_id, req.business_date)
     return MergeResponse(process_run_id=req.process_run_id, rows_merged=rows)
+
+
+@router.post("/parser/rerun-not-found", response_model=RerunNotFoundResponse, dependencies=[Depends(verify_api_key)])
+async def rerun_not_found(req: RerunNotFoundRequest, background_tasks: BackgroundTasks) -> RerunNotFoundResponse:
+    """Повторный запуск парсинга для всех NOT_FOUND-записей MSB_DB_KONTR_PARSE."""
+    settings = get_settings()
+    not_found_count = parse_repo.count_not_found()
+
+    if monitor_service.already_running(req.business_date, settings.process_name):
+        return RerunNotFoundResponse(
+            status="ALREADY_RUNNING",
+            process_run_id="",
+            not_found_count=not_found_count,
+            detail="pipeline is currently running for this business_date, try again later",
+        )
+
+    if not_found_count == 0:
+        return RerunNotFoundResponse(
+            status="NOTHING_TO_RERUN",
+            process_run_id="",
+            not_found_count=0,
+            detail="no records with STATUS_NAME=NOT_FOUND",
+        )
+
+    process_run_id = f"SVC-RERUN-{uuid.uuid4()}"
+    background_tasks.add_task(orchestrator.run_rerun_not_found, process_run_id, req.business_date)
+    logger.info(
+        "Rerun NOT_FOUND accepted: process_run_id=%s business_date=%s count=%d",
+        process_run_id, req.business_date, not_found_count,
+    )
+    return RerunNotFoundResponse(
+        status="ACCEPTED",
+        process_run_id=process_run_id,
+        not_found_count=not_found_count,
+    )
 
 
 @router.get("/health", response_model=HealthResponse)
