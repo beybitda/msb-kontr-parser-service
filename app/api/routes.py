@@ -8,6 +8,8 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
 from app.api.schemas import (
     HealthResponse,
+    ManyParseRequest,
+    ManyParseResponse,
     MergeRequest,
     MergeResponse,
     RunStatusResponse,
@@ -114,6 +116,59 @@ async def parse_one(req: SingleParseRequest) -> SingleParseResponse:
         kontr_stat=result.kontr_stat,
         parse_source_url=result.parse_source_url,
         error_message=result.error_message,
+    )
+
+
+@router.post("/parser/parse-many", response_model=ManyParseResponse, dependencies=[Depends(verify_api_key)])
+async def parse_many(req: ManyParseRequest) -> ManyParseResponse:
+    """Ручной batch-парсинг нескольких контрактов, аналог /parser/parse-one
+    для списка: нет GAP_ANALYSIS, нет UPDATE_TARGET_TABLE. Контракты
+    заводятся/переиспользуются в MSB_DB_KONTR_PARSE по очереди (как в
+    parse_one), затем парсятся одним process_run_id, сгруппированные по
+    порталу (см. orchestrator.run_many)."""
+    process_run_id = f"SVC-MANY-{uuid.uuid4()}"
+
+    rows: list[GapRow] = []
+    for item in req.contracts:
+        nomer_norm = normalize_nomer(item.nomer_kontrakta)
+        kontr_id = parse_repo.get_or_create_kontr_id(
+            nomer=item.nomer_kontrakta,
+            nomer_norm=nomer_norm,
+            portal=item.naim_portala,
+            ord_id=item.ord_id,
+            dep_id=item.dep_id,
+            process_run_id=process_run_id,
+        )
+        rows.append(
+            GapRow(
+                kontr_id=kontr_id,
+                nomer_kontrakta=item.nomer_kontrakta,
+                nomer_kontrakta_norm=nomer_norm,
+                naim_portala=item.naim_portala,
+                ord_id=item.ord_id,
+                dep_id=item.dep_id,
+            )
+        )
+
+    try:
+        results = await orchestrator.run_many(process_run_id, date.today(), rows)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return ManyParseResponse(
+        process_run_id=process_run_id,
+        results=[
+            SingleParseResponse(
+                kontr_id=r.kontr_id,
+                status_name=r.status_name.value,
+                kontr_data_start=r.kontr_data_start,
+                kontr_data_end=r.kontr_data_end,
+                kontr_stat=r.kontr_stat,
+                parse_source_url=r.parse_source_url,
+                error_message=r.error_message,
+            )
+            for r in results
+        ],
     )
 
 

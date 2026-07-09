@@ -56,6 +56,28 @@ class SingleParseResponse(BaseModel):
     error_message: str | None = None
 
 
+class SingleParseItem(BaseModel):
+    """Один контракт внутри batch-запроса /parser/parse-many."""
+
+    nomer_kontrakta: str
+    naim_portala: str  # должно содержать "Гос" или "Самрук" (см. Portal enum)
+    ord_id: int | None = None
+    dep_id: int | None = None
+
+
+class ManyParseRequest(BaseModel):
+    """Ручной batch-запуск парсинга нескольких контрактов: без
+    GAP_ANALYSIS и без UPDATE_TARGET_TABLE (аналогично /parser/parse-one,
+    но списком, в рамках одного process_run_id)."""
+
+    contracts: list[SingleParseItem] = Field(..., min_length=1, max_length=100)
+
+
+class ManyParseResponse(BaseModel):
+    process_run_id: str
+    results: list[SingleParseResponse]
+
+
 class MergeRequest(BaseModel):
     """Ручной запуск только UPDATE_TARGET_TABLE для уже готового
     process_run_id (например, если /parser/trigger был вызван с merge=false)."""
