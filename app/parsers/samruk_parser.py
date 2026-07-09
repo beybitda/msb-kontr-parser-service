@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 _CID_RE = re.compile(r"item/(\d+)/contractCard")
 
 _TITLE_RE = re.compile(
-    r"(Основной договор|Дополнительное соглашение)\s*№\s*(?P<num>\S+)\s*от\s*(?P<date>\d{2}\.\d{2}\.\d{4})"
+    r"(?P<type>[^\n№]+?)\s*№\s*(?P<num>\S+)\s*от\s*(?P<date>\d{2}\.\d{2}\.\d{4})"
 )
 _END_DATE_RE = re.compile(r"Срок действия договора\s*[:\-]?\s*(\d{2}\.\d{2}\.\d{4})")
 _STATUS_RE = re.compile(r"Статус(?: договора)?\s*[:\-]?\s*([^\n]+)")
@@ -238,7 +238,7 @@ class SamrukParser(ParserAdapter):
         return {
             "id": cid,
             "url": url,
-            "type": title_match.group(1) if title_match else None,
+            "type": title_match.group("type").strip() if title_match else None,
             "kontr_data_start": _parse_dmy(title_match.group("date")) if title_match else None,
             "kontr_data_end": kontr_data_end,
             "kontr_stat": status_match.group(1).strip() if status_match else None,
