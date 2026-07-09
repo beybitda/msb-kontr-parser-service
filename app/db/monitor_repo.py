@@ -56,9 +56,25 @@ FROM (
     WHERE BUSINESS_DATE = :business_date
       AND PROCESS_NAME  = :process_name
       AND PROCESS_TYPE  = 'SERVICE'
-      AND TASK_NAME != 'PARSE_SINGLE_CONTRACT'
+      AND TASK_NAME NOT IN (
+          'PARSE_SINGLE_CONTRACT', 'PARSE_SAMRUK_MANY', 'PARSE_GOSZAKUP_MANY', 'RERUN_NOT_FOUND'
+      )
 ) latest
 WHERE rn = 1
+"""
+
+_TASK_RUNNING_SQL = """
+SELECT STATUS_NAME
+FROM (
+    SELECT STATUS_NAME
+    FROM ANALYST_MSB2.MSB_DB_PROCESS_MONITOR
+    WHERE BUSINESS_DATE = :business_date
+      AND PROCESS_NAME  = :process_name
+      AND PROCESS_TYPE  = 'SERVICE'
+      AND TASK_NAME     = :task_name
+    ORDER BY START_TIME DESC
+)
+WHERE ROWNUM = 1
 """
 
 # Полный набор шагов run() (без PARSE_SINGLE_CONTRACT — тот принадлежит
@@ -148,6 +164,19 @@ def already_running(business_date: date, process_name: str) -> str | None:
             return "SUCCESS"
         
         return None
+
+
+def is_task_running(business_date: date, process_name: str, task_name: str) -> bool:
+    """Проверяет, что последний запуск КОНКРЕТНОГО task_name (не всего
+    пайплайна) сейчас в статусе RUNNING. Используется для ручных
+    параллельных путей (RERUN_NOT_FOUND и т.п.), которые должны
+    защищаться от повторного вызова сами по себе, не блокируя и не
+    блокируясь основным пайплайном (см. already_running)."""
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(_TASK_RUNNING_SQL, {"business_date": business_date, "process_name": process_name, "task_name": task_name})
+        row = cur.fetchone()
+        return row is not None and row[0] == "RUNNING"
 
 
 def fetch_run_status(process_run_id: str) -> list[dict]:

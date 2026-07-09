@@ -189,12 +189,12 @@ async def rerun_not_found(req: RerunNotFoundRequest, background_tasks: Backgroun
     settings = get_settings()
     not_found_count = parse_repo.count_not_found()
 
-    if monitor_service.already_running(req.business_date, settings.process_name):
+    if monitor_service.is_rerun_not_found_running(req.business_date, settings.process_name):
         return RerunNotFoundResponse(
             status="ALREADY_RUNNING",
             process_run_id="",
             not_found_count=not_found_count,
-            detail="pipeline is currently running for this business_date, try again later",
+            detail="a rerun-not-found pass is already running for this business_date",
         )
 
     if not_found_count == 0:
@@ -211,11 +211,7 @@ async def rerun_not_found(req: RerunNotFoundRequest, background_tasks: Backgroun
         "Rerun NOT_FOUND accepted: process_run_id=%s business_date=%s count=%d",
         process_run_id, req.business_date, not_found_count,
     )
-    return RerunNotFoundResponse(
-        status="ACCEPTED",
-        process_run_id=process_run_id,
-        not_found_count=not_found_count,
-    )
+    return RerunNotFoundResponse(status="ACCEPTED", process_run_id=process_run_id, not_found_count=not_found_count)
 
 
 @router.get("/health", response_model=HealthResponse)
