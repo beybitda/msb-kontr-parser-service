@@ -9,35 +9,13 @@ services:
     env_file:
       - .env
     ports:
-      - "8000:8000"
+      - "8001:8001"
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:8000/health', timeout=3).status==200 else sys.exit(1)"]
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:8001/health', timeout=3).status==200 else sys.exit(1)"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
-    networks:
-      - msb-net
-
-  # ------------------------------------------------------------------
-  # Локальный Oracle только для разработки/тестов (реальный ANALYST_MSB2
-  # живёт во внешнем контуре, в проде DB_DSN указывает на него, этот
-  # сервис не поднимается). Запуск: docker compose --profile dev up
-  # ------------------------------------------------------------------
-  oracle-dev:
-    image: gvenzl/oracle-free:23-slim
-    container_name: msb-kontr-parser-oracle-dev
-    profiles: ["dev"]
-    restart: unless-stopped
-    environment:
-      ORACLE_PASSWORD: ${ORACLE_DEV_PASSWORD:-dev_password}
-      APP_USER: ${DB_USER:-analyst_msb2}
-      APP_USER_PASSWORD: ${DB_PASSWORD:-dev_password}
-    ports:
-      - "1521:1521"
-    volumes:
-      - oracle-dev-data:/opt/oracle/oradata
-      - ./sql/ddl.sql:/container-entrypoint-startdb.d/ddl.sql:ro
     networks:
       - msb-net
 

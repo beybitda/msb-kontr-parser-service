@@ -93,7 +93,10 @@ class SamrukParser(ParserAdapter):
         async with self._lock:
             if self._browser is None:
                 self._playwright = await async_playwright().start()
-                self._browser = await self._playwright.chromium.launch(headless=True)
+                self._browser = await self._playwright.chromium.launch(
+                    headless=True,
+                    executable_path=self._settings.chromium_executable_path,
+                )
         return self._browser
 
     async def aclose(self) -> None:

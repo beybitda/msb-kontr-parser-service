@@ -48,7 +48,7 @@ uvicorn app.main:app --reload
 
 ```bash
 docker build -t msb-kontr-parser .
-docker run --env-file .env -p 8000:8000 msb-kontr-parser
+docker run --env-file .env -p 8001:8001 msb-kontr-parser
 ```
 
 Перед первым запуском накатить `sql/ddl.sql` в схему `ANALYST_MSB2`
@@ -60,7 +60,7 @@ docker run --env-file .env -p 8000:8000 msb-kontr-parser
 Post-session success command (пример):
 
 ```bash
-curl -s -X POST http://<service-host>:8000/parser/trigger \
+curl -s -X POST http://<service-host>:8001/parser/trigger \
   -H "Content-Type: application/json" \
   -H "X-API-Key: $PARSER_API_KEY" \
   -d "{\"business_date\": \"$BusinessDate\"}"

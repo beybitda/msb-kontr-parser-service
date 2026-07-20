@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     parser_api_key: str
 
     # --- Парсинг (заготовка на будущее, сейчас парсеры не реализованы) ---
+    chromium_executable_path: str = "/usr/bin/chromium"
     request_timeout_sec: float = 60.0
     request_delay_min_sec: float = 0.5
     request_delay_max_sec: float = 2.0
