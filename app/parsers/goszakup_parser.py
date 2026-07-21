@@ -20,6 +20,16 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 # https://goszakup.gov.kz/ru/egzcontract/cpublic/show/24694320
 _SHOW_ID_RE = re.compile(r"/ru/egzcontract/cpublic/show/(\d+)")
 
+_NOT_FOUND_MARKER = "Договор не найден"
+
+_RESULT_TABLE_ID = "search-result"
+
+_LISTING_ID_COL = "#"
+_LISTING_NUMBER_COL = "Номер договора"
+_LISTING_TYPE_COL = "Тип договора"
+_LISTING_STATUS_COL = "Статус договора"
+_LISTING_CREATED_COL = "Дата создания"
+
 _TYPE_LABEL = "Тип"
 _START_LABEL = "Дата создания договора"
 _END_LABEL = "Срок действия договора"
@@ -92,9 +102,17 @@ class GoszakupParser(ParserAdapter):
    async def aclose(self) -> None:
       await self._client.aclose()
 
-   async def _search(self, nomer_kontrakta_norm: str) -> list[int]:
-      """Возвращает внутренние ID договоров, найденных по номеру
-      (в порядке появления на странице)."""
+   async def _search(self, nomer_kontrakta_norm: str) -> list[dict]:
+      """Возвращает найденные договоры из таблицы #search-result: id +
+      поля из самой строки (Тип договора / Статус договора / Дата
+      создания). Эти поля служат fallback'ом, когда детальная карточка
+      недоступна ("Договор не найден") — см. _fetch_detail. Дата окончания
+      в реестре не публикуется, поэтому для fallback-случая
+      KONTR_DATA_END всегда None.
+
+      Строго привязываемся к таблице id="search-result" (а не к первой
+      попавшейся table на странице), т.к. порядок и число колонок другой
+      таблицы могут не совпадать с ожидаемым."""
       resp = await self._client.get(
          self._settings.goszakup_base_url,
          params={
@@ -106,25 +124,56 @@ class GoszakupParser(ParserAdapter):
       resp.raise_for_status()
       soup = BeautifulSoup(resp.text, "html.parser")
 
-      ids: list[int] = []
+      table = soup.find("table", id=_RESULT_TABLE_ID)
+      if table is None:
+         return []
+
+      header_cells = [th.get_text(strip=True) for th in table.select("thead th")]
+      col_idx = {name: i for i, name in enumerate(header_cells)}
+
+      def _cell(cells, label: str) -> str | None:
+         idx = col_idx.get(label)
+         if idx is None or idx >= len(cells):
+               return None
+         return cells[idx].get_text(strip=True)
+
+      rows: list[dict] = []
       seen: set[int] = set()
-      for a in soup.find_all("a", href=_SHOW_ID_RE):
-         match = _SHOW_ID_RE.search(a["href"])
-         if not match:
+      for tr in table.select("tbody tr"):
+         cells = tr.find_all("td")
+         if not cells:
                continue
-         contract_id = int(match.group(1))
+
+         id_text = _cell(cells, _LISTING_ID_COL)
+         if not id_text or not id_text.isdigit():
+               continue
+         contract_id = int(id_text)
          if contract_id in seen:
                continue
          seen.add(contract_id)
-         ids.append(contract_id)
-      return ids
 
-   async def _fetch_detail(self, contract_id: int) -> dict:
-      """Парсит таблицу «Общие сведения» детальной карточки договора."""
+         rows.append({
+               "id": contract_id,
+               "type": _cell(cells, _LISTING_TYPE_COL),
+               "kontr_stat": _cell(cells, _LISTING_STATUS_COL),
+               "kontr_data_start": _parse_ru_date(_cell(cells, _LISTING_CREATED_COL)),
+         })
+      return rows
+
+
+   async def _fetch_detail(self, contract_id: int) -> dict | None:
+      """Парсит таблицу «Общие сведения» детальной карточки договора.
+      Возвращает None, если карточки не существует ("Договор не найден") —
+      вызывающий код (parse()) в этом случае обязан упасть на fallback
+      из данных реестра (_search)."""
       url = self._settings.goszakup_detail_url_template.format(id=contract_id)
       resp = await self._client.get(url)
       resp.raise_for_status()
       soup = BeautifulSoup(resp.text, "html.parser")
+
+      if _NOT_FOUND_MARKER in soup.get_text():
+         logger.info("Goszakup detail page missing for contract_id=%s, falling back to registry row", contract_id)
+         return None
 
       fields: dict[str, str] = {}
       for row in soup.find_all("tr"):
@@ -165,8 +214,8 @@ class GoszakupParser(ParserAdapter):
    async def parse(self, row: GapRow) -> ParseResult:
       search_term = row.nomer_kontrakta_norm or row.nomer_kontrakta
       try:
-         ids = await self._search(search_term)
-         if not ids:
+         listing_rows = await self._search(search_term)
+         if not listing_rows:
                return ParseResult(
                   kontr_id=row.kontr_id,
                   status_name=StatusName.NOT_FOUND,
@@ -174,7 +223,22 @@ class GoszakupParser(ParserAdapter):
                   error_message="Контракт не найден на goszakup.gov.kz по системному номеру",
                )
 
-         details = [await self._fetch_detail(cid) for cid in ids]
+         details: list[dict] = []
+         for lr in listing_rows:
+               detail = await self._fetch_detail(lr["id"])
+               if detail is None:
+                  # детальной карточки нет — берём данные из реестра,
+                  # без даты окончания (в реестре её нет)
+                  detail = {
+                     "id": lr["id"],
+                     "url": self._settings.goszakup_detail_url_template.format(id=lr["id"]),
+                     "type": lr["type"],
+                     "kontr_data_start": lr["kontr_data_start"],
+                     "kontr_data_end": None,
+                     "kontr_stat": lr["kontr_stat"],
+                  }
+               details.append(detail)
+
          primary = self._pick_primary(details)
 
          return ParseResult(
