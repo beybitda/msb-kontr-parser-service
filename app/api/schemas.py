@@ -79,10 +79,8 @@ class ManyParseResponse(BaseModel):
 
 
 class MergeRequest(BaseModel):
-    """Ручной запуск только UPDATE_TARGET_TABLE для уже готового
-    process_run_id (например, если /parser/trigger был вызван с merge=false)."""
+    """Ручной запуск только UPDATE_TARGET_TABLE для уже готового"""
 
-    process_run_id: str
     business_date: date
 
 
