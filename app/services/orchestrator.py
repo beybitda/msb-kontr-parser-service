@@ -159,7 +159,7 @@ def run_merge(process_run_id: str, business_date: date) -> int:
     """UPDATE_TARGET_TABLE как отдельный, самостоятельно вызываемый шаг —
     используется и из run() (merge=True), и напрямую из /parser/merge."""
     with TaskMonitor("UPDATE_TARGET_TABLE", process_run_id, business_date, "MSB_DB_GRN_BLANK_MONITOR") as m:
-        merged = target_repo.merge_from_staging(process_run_id)
+        merged = target_repo.merge_from_staging()
         m.rows_processed = merged
     return merged
 

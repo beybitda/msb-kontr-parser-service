@@ -12,7 +12,6 @@ USING (
     SELECT NOMER_KONTRAKTA, KONTR_DATA_START, KONTR_DATA_END, KONTR_STAT
     FROM ANALYST_MSB2.MSB_DB_KONTR_PARSE
     WHERE STATUS_NAME = 'DONE'
-      AND PROCESS_RUN_ID = :process_run_id
 ) src
 ON (t.NOMER_KONTRAKTA = src.NOMER_KONTRAKTA)
 WHEN MATCHED THEN UPDATE SET
@@ -24,13 +23,13 @@ WHERE t.KONTR_STAT IS NULL
 """
 
 
-def merge_from_staging(process_run_id: str) -> int:
+def merge_from_staging() -> int:
     """UPDATE_TARGET_TABLE: переносит все записи со STATUS_NAME='DONE'
     из очереди/стейджинга MSB_DB_KONTR_PARSE в целевую витрину
     MSB_DB_GRN_BLANK_MONITOR. Возвращает число обновлённых строк."""
     with get_connection() as conn:
         cur = conn.cursor()
-        cur.execute(_MERGE_TARGET_SQL, {"process_run_id": process_run_id})
+        cur.execute(_MERGE_TARGET_SQL)
         rows = cur.rowcount
-        logger.info("UPDATE_TARGET_TABLE: merged rows=%d process_run_id=%s", rows, process_run_id)
+        logger.info("UPDATE_TARGET_TABLE: merged rows=%d", rows)
         return rows

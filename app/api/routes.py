@@ -179,8 +179,9 @@ async def merge(req: MergeRequest) -> MergeResponse:
     """Ручной/отложенный запуск UPDATE_TARGET_TABLE для process_run_id,
     для которого /parser/trigger вызывался с merge=false (либо merge
     нужно перезапустить отдельно после ручного разбора ошибок)."""
-    rows = orchestrator.run_merge(req.process_run_id, req.business_date)
-    return MergeResponse(process_run_id=req.process_run_id, rows_merged=rows)
+    process_run_id = f"SVC-MERGE-{uuid.uuid4()}"
+    rows = orchestrator.run_merge(process_run_id, req.business_date)
+    return MergeResponse(process_run_id=process_run_id, rows_merged=rows)
 
 
 @router.post("/parser/rerun-not-found", response_model=RerunNotFoundResponse, dependencies=[Depends(verify_api_key)])
