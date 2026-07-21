@@ -5,7 +5,7 @@ import json
 import logging
 import re
 from datetime import datetime
-from urllib.parse import quote
+from urllib.parse import urlencode
 
 from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
 
@@ -25,6 +25,18 @@ _END_DATE_RE = re.compile(r"Срок действия договора\s*[:\-]?\
 _STATUS_RE = re.compile(r"Статус(?: договора)?\s*[:\-]?\s*([^\n]+)")
 
 _MAIN_CONTRACT_TYPE = "Основной договор"
+
+# По умолчанию портал в поиске (без ccs) отдаёт только договоры со
+# статусом SIGNED (Заключен). Портал принимает только ОДИН ccs за
+# запрос (не список) — поэтому если по номеру ничего не нашлось в
+# дефолтном статусе, остальные статусы запрашиваются отдельными
+# запросами параллельно (см. _search) и объединяются.
+_FALLBACK_STATUSES = [
+    "RESCIND",
+    "EXECUTED",
+    "SUPPLEMENTARY_AGREEMENT",
+    "REFUSAL_PERFORM_CONTRACT",
+]
 
 # Селектор попапа карточки — из рабочего скрапера (scraper_card.py):
 # Angular Material диалог / модалка / кастомный компонент карточки.
@@ -60,6 +72,10 @@ class SamrukParser(ParserAdapter):
     1. Поиск по системному номеру (row.nomer_kontrakta_norm):
        GET https://zakup.sk.kz/#/ext?tabs=contractCard&sn=<номер>&page=1
        -> cid одного или нескольких договоров (основной + доп. соглашения).
+       Без ccs портал отдаёт только договоры со статусом SIGNED (Заключен).
+       Если ничего не нашлось — параллельно (asyncio.gather) повторяем
+       поиск отдельным запросом на каждый из _FALLBACK_STATUSES (портал
+       принимает только один ccs за раз) и объединяем найденные cid.
     2. Карточка договора (попап):
        GET https://zakup.sk.kz/#/ext(popup:item/<cid>/contractCard)?tabs=contractCard&cid=<cid>&page=1
 
@@ -76,7 +92,6 @@ class SamrukParser(ParserAdapter):
 
     portal_name = "Самрук-Казына"
 
-    _SEARCH_URL_TMPL = "https://zakup.sk.kz/#/ext?tabs=contractCard&sn={sn}&page=1"
     _DETAIL_URL_TMPL = (
         "https://zakup.sk.kz/#/ext(popup:item/{cid}/contractCard)?tabs=contractCard&cid={cid}&page=1"
     )
@@ -132,10 +147,20 @@ class SamrukParser(ParserAdapter):
                 await page.wait_for_timeout(3000)
         return False
 
-    async def _search(self, nomer_kontrakta_norm: str) -> list[int]:
-        """Возвращает cid договоров, найденных по системному номеру
-        (в порядке появления на странице)."""
-        url = self._SEARCH_URL_TMPL.format(sn=quote(nomer_kontrakta_norm, safe=""))
+    @staticmethod
+    def _build_search_url(sn: str, status: str | None = None) -> str:
+        """Собирает URL поиска. status=None -> дефолт портала (SIGNED).
+        Портал принимает только один ccs за запрос, поэтому это всегда
+        одиночный статус, не список."""
+        params = [("tabs", "contractCard"), ("sn", sn), ("page", "1")]
+        if status:
+            params.append(("ccs", status))
+        return "https://zakup.sk.kz/#/ext?" + urlencode(params)
+
+    async def _search_with_status(self, nomer_kontrakta_norm: str, status: str | None) -> list[int]:
+        """Возвращает cid договоров, найденных по системному номеру,
+        для ОДНОГО статуса (ccs). status=None -> дефолт портала (SIGNED)."""
+        url = self._build_search_url(nomer_kontrakta_norm, status)
         context = await self._new_context()
 
         ids: list[int] = []
@@ -167,12 +192,44 @@ class SamrukParser(ParserAdapter):
                     ids.append(cid)
 
         except Exception as exc:  # noqa: BLE001
-            logger.exception("Samruk search error for nomer_kontrakta_norm=%s", nomer_kontrakta_norm)
-            raise ValueError(f"Playwright error during search: {exc}") from exc
+            logger.exception(
+                "Samruk search error for nomer_kontrakta_norm=%s status=%s", nomer_kontrakta_norm, status
+            )
+            raise ValueError(f"Playwright error during search (status={status}): {exc}") from exc
         finally:
             await context.close()
-        
+
         return ids
+
+    async def _search(self, nomer_kontrakta_norm: str) -> list[int]:
+        """Сначала ищем в дефолтном статусе портала (SIGNED). Если пусто —
+        параллельно (asyncio.gather) запрашиваем каждый из
+        _FALLBACK_STATUSES по отдельности (портал принимает только один
+        ccs за раз) и объединяем найденные cid."""
+        ids = await self._search_with_status(nomer_kontrakta_norm, status=None)
+        if ids:
+            return ids
+
+        logger.info(
+            "Samruk: не найдено в SIGNED, повторяю поиск параллельно по ccs=%s", _FALLBACK_STATUSES
+        )
+        results = await asyncio.gather(
+            *[self._search_with_status(nomer_kontrakta_norm, status=s) for s in _FALLBACK_STATUSES],
+            return_exceptions=True,
+        )
+
+        combined: list[int] = []
+        seen: set[int] = set()
+        for status, res in zip(_FALLBACK_STATUSES, results):
+            if isinstance(res, Exception):
+                logger.warning("Samruk fallback search failed for ccs=%s: %s", status, res)
+                continue
+            for cid in res:
+                if cid not in seen:
+                    seen.add(cid)
+                    combined.append(cid)
+
+        return combined
 
     async def _fetch_detail(self, cid: int) -> dict:
         """Открывает попап карточки договора и вытаскивает поля.
@@ -273,8 +330,11 @@ class SamrukParser(ParserAdapter):
                 return ParseResult(
                     kontr_id=row.kontr_id,
                     status_name=StatusName.NOT_FOUND,
-                    parse_source_url=self._SEARCH_URL_TMPL.format(sn=quote(search_term, safe="")),
-                    error_message="Контракт не найден на zakup.sk.kz по системному номеру",
+                    parse_source_url=self._build_search_url(search_term),
+                    error_message=(
+                        "Контракт не найден на zakup.sk.kz по системному номеру "
+                        "(проверены SIGNED и остальные статусы)"
+                    ),
                 )
 
             details = [await self._fetch_detail(cid) for cid in ids]
@@ -294,6 +354,6 @@ class SamrukParser(ParserAdapter):
             return ParseResult(
                 kontr_id=row.kontr_id,
                 status_name=StatusName.ERROR,
-                parse_source_url=self._DETAIL_URL_TMPL.format(cid=ids[0]) if ids else None,
+                parse_source_url=self._DETAIL_URL_TMPL.format(cid=ids[0]) if ids else self._build_search_url(search_term),
                 error_message=f"Playwright error: {exc}",
             )
