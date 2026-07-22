@@ -43,6 +43,13 @@ _FALLBACK_STATUSES = [
 _POPUP_SELECTOR = ".mat-dialog-container, .modal-content, app-item-details"
 _SPINNER_SELECTOR = ".mat-progress-spinner, .loading-indicator"
 
+# Бейдж статуса внутри попапа карточки, напр.:
+# <div class="m-status m-status--warning">Отказ от исполнения договора</div>
+# Читается напрямую из разметки — это фактическое место рендера статуса,
+# в отличие от regex по метке "Статус:" в тексте всей страницы (который
+# может относиться к другой карточке в списке результатов позади попапа).
+_STATUS_BADGE_SELECTOR = ".m-status"
+
 _NAV_MAX_RETRIES = 3
 _POST_NAV_WAIT_MS = 5000
 
@@ -83,7 +90,8 @@ class SamrukParser(ParserAdapter):
       - "Основной договор № <N> от <DD.MM.YYYY>" / "Дополнительное
         соглашение № ... от ..." -> тип + KONTR_DATA_START
       - "Срок действия договора" -> KONTR_DATA_END
-      - "Статус" -> KONTR_STAT
+      - "Статус" -> KONTR_STAT (читается из бейджа .m-status внутри
+        попапа, с fallback на regex по тексту страницы)
 
     Как и в goszakup: приоритет у "Основной договор", иначе — самый
     свежий по дате начала. Весь список найденных договоров сохраняется
@@ -237,20 +245,20 @@ class SamrukParser(ParserAdapter):
         Тип/№/дата начала ("Основной договор № ... от ...") и статус
         рендерятся в карточке списка результатов (классы m-found-item__*),
         которая остаётся в DOM позади попапа (Angular Material диалог
-        накладывается поверх, а не заменяет страницу) — поэтому они
-        читаются из текста всей страницы. Дата окончания — из блока
-        попапа .m-infoblock__layout с заголовком "Срок действия
-        договора", извлекается через селектор (надёжнее регекса по
-        всему тексту, т.к. в разметке может быть несколько дат/блоков).
-
-        ВАЖНО (не проверено на реальной странице): если по системному
-        номеру находится несколько договоров (основной + доп.
-        соглашения), под попапом в списке останутся видны ВСЕ найденные
-        карточки — регекс по body_text возьмёт первое совпадение
-        "Статус", что не обязательно относится к текущему cid. Если
-        статус будет "перескакивать" между договорами одного номера —
-        нужно сузить поиск до конкретной .m-found-item карточки с
-        этим cid, а не читать весь body.
+        накладывается поверх, а не заменяет страницу) — раньше статус
+        читался из текста всей страницы. Теперь KONTR_STAT в первую
+        очередь берётся из бейджа .m-status ВНУТРИ попапа (см.
+        _STATUS_BADGE_SELECTOR) — это фактический элемент разметки,
+        где рендерится текущий статус конкретного договора (включая
+        случаи вроде "Отказ от исполнения договора", найденные через
+        fallback-статусы в _search), и в отличие от regex по всему body
+        не может «перепрыгнуть» на статус другой карточки в списке
+        результатов позади попапа. _STATUS_RE оставлен как запасной
+        путь на случай, если бейдж не найден/сменится вёрстка. Дата
+        окончания — из блока попапа .m-infoblock__layout с заголовком
+        "Срок действия договора", извлекается через селектор (надёжнее
+        регекса по всему тексту, т.к. в разметке может быть несколько
+        дат/блоков).
         """
         url = self._DETAIL_URL_TMPL.format(cid=cid)
         context = await self._new_context()
@@ -259,10 +267,24 @@ class SamrukParser(ParserAdapter):
             if not await self._goto_with_retry(page, url):
                 raise RuntimeError(f"Не удалось загрузить карточку договора: {url}")
 
+            popup = page.locator(_POPUP_SELECTOR).first
             try:
-                await page.locator(_POPUP_SELECTOR).first.wait_for(state="visible", timeout=15000)
+                await popup.wait_for(state="visible", timeout=15000)
             except Exception:  # noqa: BLE001 — попап не поймали отдельным селектором, читаем что есть
                 logger.warning("Samruk popup selector not matched for cid=%s", cid)
+
+            # Статус — из бейджа .m-status ВНУТРИ попапа (не по всей
+            # странице), чтобы не подхватить статус другой карточки из
+            # списка результатов позади попапа.
+            kontr_stat: str | None = None
+            status_loc = popup.locator(_STATUS_BADGE_SELECTOR)
+            try:
+                await status_loc.first.wait_for(state="visible", timeout=15000)
+                kontr_stat = (await status_loc.first.inner_text()).strip()
+            except Exception:  # noqa: BLE001 — бейдж не появился за таймаут, уйдём в запасной regex ниже
+                logger.warning(
+                    "Samruk %s not found for cid=%s, falling back to regex", _STATUS_BADGE_SELECTOR, cid
+                )
 
             # count()+loop берёт снимок DOM в один момент и не ждёт —
             # содержимое попапа может дозагрузиться уже ПОСЛЕ того, как
@@ -281,15 +303,19 @@ class SamrukParser(ParserAdapter):
             except Exception:  # noqa: BLE001 — блок не появился за таймаут, уйдём в запасной regex ниже
                 logger.warning("Samruk .m-infoblock__title (срок действия) not found for cid=%s", cid)
 
-            # читаем body ПОСЛЕ ожидания инфоблока — тем самым title/status
-            # (регексом ниже) тоже получают дополнительное время на отрисовку,
-            # а не читаются раньше, чем поле, которое как раз не находилось
+            # читаем body ПОСЛЕ ожидания инфоблока — тем самым title
+            # (регексом ниже) тоже получают дополнительное время на
+            # отрисовку, а не читается раньше, чем поле, которое как раз
+            # не находилось
             body_text = await page.locator("body").inner_text()
         finally:
             await context.close()
 
         title_match = _TITLE_RE.search(body_text)
-        status_match = _STATUS_RE.search(body_text)
+        if kontr_stat is None:
+            # запасной путь, если .m-status не нашёлся / сменилась вёрстка
+            status_match = _STATUS_RE.search(body_text)
+            kontr_stat = status_match.group(1).strip() if status_match else None
         if kontr_data_end is None:
             # запасной путь, если .m-infoblock__layout не нашёлся / сменилась вёрстка
             end_match = _END_DATE_RE.search(body_text)
@@ -301,7 +327,7 @@ class SamrukParser(ParserAdapter):
             "type": title_match.group("type").strip() if title_match else None,
             "kontr_data_start": _parse_dmy(title_match.group("date")) if title_match else None,
             "kontr_data_end": kontr_data_end,
-            "kontr_stat": status_match.group(1).strip() if status_match else None,
+            "kontr_stat": kontr_stat,
         }
 
     @staticmethod
