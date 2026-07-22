@@ -133,7 +133,7 @@ class SamrukParser(ParserAdapter):
     portal_name = "Самрук-Казына"
 
     _DETAIL_URL_TMPL = (
-        "https://zakup.sk.kz/#/ext(popup:item/{cid}/contractCard)?tabs=contractCard&cid={cid}&page=1"
+        "https://zakup.sk.kz/#/ext(popup:item/{cid}/contractCard)?tabs=contractCard&cid={cid}&ccs={status}&page=1"
     )
 
     def __init__(self) -> None:
@@ -264,6 +264,7 @@ class SamrukParser(ParserAdapter):
                         "id": int(cid_match.group(1)),
                         "type": title_match.group("type").strip(),
                         "num": num,
+                        "status": status,
                         "kontr_data_start": _parse_dmy(title_match.group("date")),
                     }
                 )
@@ -312,7 +313,7 @@ class SamrukParser(ParserAdapter):
 
         return self._pick_primary(combined)
 
-    async def _fetch_detail(self, cid: int) -> dict:
+    async def _fetch_detail(self, cid: int, status: str) -> dict:
         """Открывает попап карточки договора и вытаскивает ТОЛЬКО срок
         окончания и статус — тип/номер/дата начала уже известны из
         _search_with_status (заголовок в списке результатов) и здесь не
@@ -321,9 +322,13 @@ class SamrukParser(ParserAdapter):
         остаётся видимым список результатов поиска, и чтение всего body
         может зацепить данные другого договора с тем же префиксом номера.
 
+        status (ccs) — тот же статус, под которым договор был найден в
+        _search_with_status: без него портал по умолчанию ищет попап в
+        SIGNED и может не открыть карточку договора из другого статуса.
+
         Если попап не появился за таймаут — это сбой скрапинга (ERROR),
         поэтому исключение не глушится, а поднимается наверх."""
-        url = self._DETAIL_URL_TMPL.format(cid=cid)
+        url = self._DETAIL_URL_TMPL.format(cid=cid, status=status)
         context = await self._new_context()
         try:
             page = await context.new_page()
@@ -387,6 +392,7 @@ class SamrukParser(ParserAdapter):
     async def parse(self, row: GapRow) -> ParseResult:
         search_term = row.nomer_kontrakta_norm or row.nomer_kontrakta
         primary_id: int | None = None
+        primary_status: str | None = None
         try:
             primary = await self._search(search_term)
             if primary is None:
@@ -401,7 +407,8 @@ class SamrukParser(ParserAdapter):
                 )
 
             primary_id = primary["id"]
-            detail = await self._fetch_detail(primary_id)
+            primary_status = primary["status"]
+            detail = await self._fetch_detail(primary_id, primary_status)
 
             return ParseResult(
                 kontr_id=row.kontr_id,
@@ -418,7 +425,9 @@ class SamrukParser(ParserAdapter):
                 kontr_id=row.kontr_id,
                 status_name=StatusName.ERROR,
                 parse_source_url=(
-                    self._DETAIL_URL_TMPL.format(cid=primary_id) if primary_id else self._build_search_url(search_term)
+                    self._DETAIL_URL_TMPL.format(cid=primary_id, status=primary_status)
+                    if primary_id and primary_status
+                    else self._build_search_url(search_term)
                 ),
                 error_message=f"Playwright error: {exc}",
             )
