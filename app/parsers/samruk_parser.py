@@ -12,31 +12,53 @@ from playwright.async_api import Browser, BrowserContext, Page, Playwright, asyn
 from app.core.config import get_settings
 from app.models.dto import GapRow, ParseResult, StatusName
 from app.parsers.base import ParserAdapter
+from app.parsers.normalizer import normalize_nomer
 
 logger = logging.getLogger(__name__)
 
 # Попап карточки договора: #/ext(popup:item/5453559047/contractCard)?tabs=contractCard&cid=5453559047&page=1
 _CID_RE = re.compile(r"item/(\d+)/contractCard")
 
+# Заголовок карточки в списке результатов поиска, например:
+# "Основной договор № 1076911/2025/3 от 19.05.2025"
 _TITLE_RE = re.compile(
     r"(?P<type>[^\n№]+?)\s*№\s*(?P<num>\S+)\s*от\s*(?P<date>\d{2}\.\d{2}\.\d{4})"
 )
-_END_DATE_RE = re.compile(r"Срок действия договора\s*[:\-]?\s*(\d{2}\.\d{2}\.\d{4})")
-_STATUS_RE = re.compile(r"Статус(?: договора)?\s*[:\-]?\s*([^\n]+)")
 
 _MAIN_CONTRACT_TYPE = "Основной договор"
 
-# По умолчанию портал в поиске (без ccs) отдаёт только договоры со
-# статусом SIGNED (Заключен). Портал принимает только ОДИН ccs за
-# запрос (не список) — поэтому если по номеру ничего не нашлось в
-# дефолтном статусе, остальные статусы запрашиваются отдельными
-# запросами параллельно (см. _search) и объединяются.
-_FALLBACK_STATUSES = [
+# Портал матчит поиск по ПРЕФИКСУ номера (например "1076911/2025/5"
+# находит все "1076911/2025/*"), поэтому по одному запросу может
+# вернуться несколько РАЗНЫХ договоров с общим префиксом — точное
+# совпадение номера проверяется отдельно по заголовку каждой карточки
+# (_TITLE_RE -> num), а не по факту наличия в выдаче.
+#
+# Портал принимает только ОДИН ccs (статус) за запрос — поэтому все
+# статусы запрашиваются параллельно (asyncio.gather), а не
+# последовательно с fallback'ом, как было раньше: последовательный
+# fallback (сначала SIGNED, потом остальные только если SIGNED пуст)
+# давал неполный набор договоров по номеру, если, например, основной
+# договор был в статусе EXECUTED, а SIGNED-запрос уже что-то нашёл (с
+# другим точным номером под тем же префиксом) и fallback не запускался.
+_ALL_STATUSES = [
+    "SIGNED",
     "RESCIND",
     "EXECUTED",
     "SUPPLEMENTARY_AGREEMENT",
     "REFUSAL_PERFORM_CONTRACT",
 ]
+
+# Селекторы карточки в списке результатов поиска (используются для
+# фильтрации по точному номеру ДО открытия попапа/детальной карточки).
+_FOUND_ITEM_SELECTOR = ".m-found-item"
+_FOUND_ITEM_TITLE_SELECTOR = ".m-found-item__title"
+# ВНИМАНИЕ (не проверено на реальной странице): предполагается, что
+# .m-found-item__num содержит внутренний числовой id договора (тот же,
+# что подставляется в URL попапа item/<id>/contractCard), а НЕ номер
+# контракта из ТЗ (1076911/2025/3) — это поведение унаследовано из
+# предыдущей версии парсера и не менялось. Если вёрстка окажется другой,
+# скорректировать здесь.
+_FOUND_ITEM_NUM_SELECTOR = ".m-found-item__num"
 
 # Селектор попапа карточки — из рабочего скрапера (scraper_card.py):
 # Angular Material диалог / модалка / кастомный компонент карточки.
@@ -76,26 +98,36 @@ class SamrukParser(ParserAdapter):
     рабочем скрапере: goto(wait_until="domcontentloaded") + фиксированная
     пауза + явное ожидание попапа/спиннера, с ретраями.
 
-    1. Поиск по системному номеру (row.nomer_kontrakta_norm):
-       GET https://zakup.sk.kz/#/ext?tabs=contractCard&sn=<номер>&page=1
-       -> cid одного или нескольких договоров (основной + доп. соглашения).
-       Без ccs портал отдаёт только договоры со статусом SIGNED (Заключен).
-       Если ничего не нашлось — параллельно (asyncio.gather) повторяем
-       поиск отдельным запросом на каждый из _FALLBACK_STATUSES (портал
-       принимает только один ccs за раз) и объединяем найденные cid.
-    2. Карточка договора (попап):
+    Алгоритм (обновлён — портал матчит по префиксу номера, поэтому точное
+    совпадение проверяется на этапе поиска, а не после):
+
+    1. Поиск по системному номеру (row.nomer_kontrakta_norm), ПАРАЛЛЕЛЬНО
+       по всем статусам сразу (портал принимает только один ccs за
+       запрос — см. _ALL_STATUSES):
+       GET https://zakup.sk.kz/#/ext?tabs=contractCard&sn=<номер>&ccs=<статус>&page=1
+    2. Для каждой карточки в выдаче читаем заголовок
+       (.m-found-item__title, например "Основной договор № 1076911/2025/3
+       от 19.05.2025") и парсим его _TITLE_RE -> type/num/дата начала.
+       Карточка попадает в кандидаты, ТОЛЬКО если normalize_nomer(num)
+       точно совпадает с искомым номером — иначе это чужой договор с тем
+       же префиксом, отбрасываем.
+    3. Среди кандидатов (по всем статусам сразу, объединены и
+       дедуплицированы по cid) выбирается «основной» договор
+       (_pick_primary: приоритет "Основной договор", иначе самый свежий
+       по дате начала) — это единственный id, с которым работаем дальше.
+    4. Детальная карточка (попап) открывается ТОЛЬКО за сроком окончания
+       и статусом (тип/номер/дата начала уже известны из шага 2, повторно
+       не парсятся):
        GET https://zakup.sk.kz/#/ext(popup:item/<cid>/contractCard)?tabs=contractCard&cid=<cid>&page=1
+       Оба поля читаются точечно по селекторам ВНУТРИ попапа
+       (.m-infoblock__title "Срок действия договора" / _STATUS_BADGE_SELECTOR),
+       без regex по всему тексту попапа/страницы — под попапом в DOM
+       остаётся видимым список результатов поиска, и чтение всего body
+       могло бы задеть данные другого договора с тем же префиксом номера.
 
-    Поля вытаскиваются регулярками из текста попапа:
-      - "Основной договор № <N> от <DD.MM.YYYY>" / "Дополнительное
-        соглашение № ... от ..." -> тип + KONTR_DATA_START
-      - "Срок действия договора" -> KONTR_DATA_END
-      - "Статус" -> KONTR_STAT (читается из бейджа .m-status внутри
-        попапа, с fallback на regex по тексту страницы)
-
-    Как и в goszakup: приоритет у "Основной договор", иначе — самый
-    свежий по дате начала. Весь список найденных договоров сохраняется
-    в RAW_RESPONSE.
+    Если попап не удалось открыть/распарсить — это ERROR (сбой скрапинга),
+    а не NOT_FOUND: наличие подходящего договора уже подтверждено поиском
+    на шаге 2-3.
     """
 
     portal_name = "Самрук-Казына"
@@ -157,22 +189,26 @@ class SamrukParser(ParserAdapter):
 
     @staticmethod
     def _build_search_url(sn: str, status: str | None = None) -> str:
-        """Собирает URL поиска. status=None -> дефолт портала (SIGNED).
-        Портал принимает только один ccs за запрос, поэтому это всегда
-        одиночный статус, не список."""
+        """Собирает URL поиска. status=None -> без ccs (используется только
+        для сообщений об ошибке/URL в NOT_FOUND, не для реального поиска —
+        реальный поиск всегда идёт по конкретному статусу из _ALL_STATUSES)."""
         params = [("tabs", "contractCard"), ("sn", sn), ("page", "1")]
         if status:
             params.append(("ccs", status))
         return "https://zakup.sk.kz/#/ext?" + urlencode(params)
 
-    async def _search_with_status(self, nomer_kontrakta_norm: str, status: str | None) -> list[int]:
-        """Возвращает cid договоров, найденных по системному номеру,
-        для ОДНОГО статуса (ccs). status=None -> дефолт портала (SIGNED)."""
+    async def _search_with_status(
+        self, nomer_kontrakta_norm: str, status: str, target_norm: str
+    ) -> list[dict]:
+        """Ищет договоры по системному номеру для ОДНОГО статуса (ccs) и
+        сразу отфильтровывает по ТОЧНОМУ совпадению номера в заголовке
+        карточки (.m-found-item__title, см. _TITLE_RE) — поиск на портале
+        матчит по префиксу, поэтому без этой фильтрации в выдачу
+        подмешиваются договоры с тем же префиксом, но другим номером."""
         url = self._build_search_url(nomer_kontrakta_norm, status)
         context = await self._new_context()
 
-        ids: list[int] = []
-        seen: set[int] = set()
+        matched: list[dict] = []
         try:
             page = await context.new_page()
             if not await self._goto_with_retry(page, url):
@@ -185,19 +221,52 @@ class SamrukParser(ParserAdapter):
             # небольшая доп. пауза на отрисовку списка SPA
             await page.wait_for_timeout(1500)
 
-            # запасной путь: карточки результатов поиска (класс из рабочего
-            # скрапера), на случай если ссылка не содержит /contractCard/
-            item_nums: list[str] = await page.locator(".m-found-item__num").evaluate_all(
-                "els => els.map(e => e.innerText || '')"
-            )
-            for t in item_nums:
-                mm = re.search(r"([0-9]{6,})", t)
-                if not mm:
+            items = page.locator(_FOUND_ITEM_SELECTOR)
+            count = await items.count()
+
+            for i in range(count):
+                item = items.nth(i)
+                try:
+                    # ВНИМАНИЕ: внутри одной .m-found-item бывает НЕСКОЛЬКО
+                    # .m-found-item__title — первый это предмет закупки
+                    # ("Текущий ремонт резервуара..."), и только один из
+                    # остальных — нужный "Основной договор № ... от ..."
+                    # (или "Дополнительное соглашение № ... от ..."). Поэтому
+                    # перебираем все заголовки карточки и ищем тот, что
+                    # матчится _TITLE_RE, а не берём первый попавшийся.
+                    title_texts = await item.locator(_FOUND_ITEM_TITLE_SELECTOR).all_inner_texts()
+                    num_text = await item.locator(_FOUND_ITEM_NUM_SELECTOR).first.inner_text()
+                except Exception:  # noqa: BLE001 — карточка без ожидаемой разметки, пропускаем
                     continue
-                cid = int(mm.group(1))
-                if cid not in seen:
-                    seen.add(cid)
-                    ids.append(cid)
+
+                title_match = None
+                for title_text in title_texts:
+                    m = _TITLE_RE.search(title_text)
+                    if m:
+                        title_match = m
+                        break
+                if title_match is None:
+                    continue
+
+                num = title_match.group("num").strip()
+                if normalize_nomer(num) != target_norm:
+                    continue  # чужой договор с тем же префиксом номера
+
+                cid_match = re.search(r"([0-9]{6,})", num_text)
+                if not cid_match:
+                    logger.warning(
+                        "Samruk: карточка с совпавшим номером %s без id (status=%s)", num, status
+                    )
+                    continue
+
+                matched.append(
+                    {
+                        "id": int(cid_match.group(1)),
+                        "type": title_match.group("type").strip(),
+                        "num": num,
+                        "kontr_data_start": _parse_dmy(title_match.group("date")),
+                    }
+                )
 
         except Exception as exc:  # noqa: BLE001
             logger.exception(
@@ -207,59 +276,53 @@ class SamrukParser(ParserAdapter):
         finally:
             await context.close()
 
-        return ids
+        return matched
 
-    async def _search(self, nomer_kontrakta_norm: str) -> list[int]:
-        """Сначала ищем в дефолтном статусе портала (SIGNED). Если пусто —
-        параллельно (asyncio.gather) запрашиваем каждый из
-        _FALLBACK_STATUSES по отдельности (портал принимает только один
-        ccs за раз) и объединяем найденные cid."""
-        ids = await self._search_with_status(nomer_kontrakta_norm, status=None)
-        if ids:
-            return ids
+    async def _search(self, nomer_kontrakta_norm: str) -> dict | None:
+        """Параллельно (asyncio.gather) запрашивает ВСЕ статусы разом
+        (_ALL_STATUSES — портал принимает только один ccs за запрос),
+        объединяет и дедуплицирует по id уже отфильтрованные (по точному
+        номеру) кандидаты и выбирает среди них «основной» договор
+        (_pick_primary). Возвращает единственный словарь-кандидат
+        (id + type/num/kontr_data_start) или None, если точных совпадений
+        не найдено ни в одном статусе."""
+        target_norm = normalize_nomer(nomer_kontrakta_norm)
 
-        logger.info(
-            "Samruk: не найдено в SIGNED, повторяю поиск параллельно по ccs=%s", _FALLBACK_STATUSES
-        )
         results = await asyncio.gather(
-            *[self._search_with_status(nomer_kontrakta_norm, status=s) for s in _FALLBACK_STATUSES],
+            *[
+                self._search_with_status(nomer_kontrakta_norm, status, target_norm)
+                for status in _ALL_STATUSES
+            ],
             return_exceptions=True,
         )
 
-        combined: list[int] = []
+        combined: list[dict] = []
         seen: set[int] = set()
-        for status, res in zip(_FALLBACK_STATUSES, results):
+        for status, res in zip(_ALL_STATUSES, results):
             if isinstance(res, Exception):
-                logger.warning("Samruk fallback search failed for ccs=%s: %s", status, res)
+                logger.warning("Samruk search failed for ccs=%s: %s", status, res)
                 continue
-            for cid in res:
-                if cid not in seen:
-                    seen.add(cid)
-                    combined.append(cid)
+            for item in res:
+                if item["id"] not in seen:
+                    seen.add(item["id"])
+                    combined.append(item)
 
-        return combined
+        if not combined:
+            return None
+
+        return self._pick_primary(combined)
 
     async def _fetch_detail(self, cid: int) -> dict:
-        """Открывает попап карточки договора и вытаскивает поля.
+        """Открывает попап карточки договора и вытаскивает ТОЛЬКО срок
+        окончания и статус — тип/номер/дата начала уже известны из
+        _search_with_status (заголовок в списке результатов) и здесь не
+        перечитываются. Оба поля читаются строго из элементов ВНУТРИ
+        попапа (_POPUP_SELECTOR), а не всей страницы: под попапом в DOM
+        остаётся видимым список результатов поиска, и чтение всего body
+        может зацепить данные другого договора с тем же префиксом номера.
 
-        Тип/№/дата начала ("Основной договор № ... от ...") и статус
-        рендерятся в карточке списка результатов (классы m-found-item__*),
-        которая остаётся в DOM позади попапа (Angular Material диалог
-        накладывается поверх, а не заменяет страницу) — раньше статус
-        читался из текста всей страницы. Теперь KONTR_STAT в первую
-        очередь берётся из бейджа .m-status ВНУТРИ попапа (см.
-        _STATUS_BADGE_SELECTOR) — это фактический элемент разметки,
-        где рендерится текущий статус конкретного договора (включая
-        случаи вроде "Отказ от исполнения договора", найденные через
-        fallback-статусы в _search), и в отличие от regex по всему body
-        не может «перепрыгнуть» на статус другой карточки в списке
-        результатов позади попапа. _STATUS_RE оставлен как запасной
-        путь на случай, если бейдж не найден/сменится вёрстка. Дата
-        окончания — из блока попапа .m-infoblock__layout с заголовком
-        "Срок действия договора", извлекается через селектор (надёжнее
-        регекса по всему тексту, т.к. в разметке может быть несколько
-        дат/блоков).
-        """
+        Если попап не появился за таймаут — это сбой скрапинга (ERROR),
+        поэтому исключение не глушится, а поднимается наверх."""
         url = self._DETAIL_URL_TMPL.format(cid=cid)
         context = await self._new_context()
         try:
@@ -268,31 +331,10 @@ class SamrukParser(ParserAdapter):
                 raise RuntimeError(f"Не удалось загрузить карточку договора: {url}")
 
             popup = page.locator(_POPUP_SELECTOR).first
-            try:
-                await popup.wait_for(state="visible", timeout=15000)
-            except Exception:  # noqa: BLE001 — попап не поймали отдельным селектором, читаем что есть
-                logger.warning("Samruk popup selector not matched for cid=%s", cid)
+            await popup.wait_for(state="visible", timeout=15000)
 
-            # Статус — из бейджа .m-status ВНУТРИ попапа (не по всей
-            # странице), чтобы не подхватить статус другой карточки из
-            # списка результатов позади попапа.
-            kontr_stat: str | None = None
-            status_loc = popup.locator(_STATUS_BADGE_SELECTOR)
-            try:
-                await status_loc.first.wait_for(state="visible", timeout=15000)
-                kontr_stat = (await status_loc.first.inner_text()).strip()
-            except Exception:  # noqa: BLE001 — бейдж не появился за таймаут, уйдём в запасной regex ниже
-                logger.warning(
-                    "Samruk %s not found for cid=%s, falling back to regex", _STATUS_BADGE_SELECTOR, cid
-                )
-
-            # count()+loop берёт снимок DOM в один момент и не ждёт —
-            # содержимое попапа может дозагрузиться уже ПОСЛЕ того, как
-            # сам диалог стал visible (Angular тянет данные вкладки
-            # отдельным запросом). Поэтому здесь — locator с has_text и
-            # явным wait_for, который сам ретраит до таймаута.
             kontr_data_end: datetime | None = None
-            end_title_loc = page.locator(".m-infoblock__title", has_text="Срок действия договора")
+            end_title_loc = popup.locator(".m-infoblock__title", has_text="Срок действия договора")
             try:
                 await end_title_loc.first.wait_for(state="visible", timeout=15000)
                 title_text = await end_title_loc.first.inner_text()
@@ -300,32 +342,23 @@ class SamrukParser(ParserAdapter):
                 full_text = await block.inner_text()
                 value_text = full_text.replace(title_text, "", 1).strip()
                 kontr_data_end = _parse_dmy(value_text)
-            except Exception:  # noqa: BLE001 — блок не появился за таймаут, уйдём в запасной regex ниже
-                logger.warning("Samruk .m-infoblock__title (срок действия) not found for cid=%s", cid)
+            except Exception:  # noqa: BLE001
+                logger.warning("Samruk .m-infoblock__title (срок действия) not found in popup for cid=%s", cid)
 
-            # читаем body ПОСЛЕ ожидания инфоблока — тем самым title
-            # (регексом ниже) тоже получают дополнительное время на
-            # отрисовку, а не читается раньше, чем поле, которое как раз
-            # не находилось
-            body_text = await page.locator("body").inner_text()
+            kontr_stat: str | None = None
+            status_loc = popup.locator(_STATUS_BADGE_SELECTOR)
+            try:
+                await status_loc.first.wait_for(state="visible", timeout=15000)
+                kontr_stat = (await status_loc.first.inner_text()).strip()
+            except Exception:  # noqa: BLE001
+                logger.warning("Samruk %s (статус) not found in popup for cid=%s", _STATUS_BADGE_SELECTOR, cid)
+
         finally:
             await context.close()
-
-        title_match = _TITLE_RE.search(body_text)
-        if kontr_stat is None:
-            # запасной путь, если .m-status не нашёлся / сменилась вёрстка
-            status_match = _STATUS_RE.search(body_text)
-            kontr_stat = status_match.group(1).strip() if status_match else None
-        if kontr_data_end is None:
-            # запасной путь, если .m-infoblock__layout не нашёлся / сменилась вёрстка
-            end_match = _END_DATE_RE.search(body_text)
-            kontr_data_end = _parse_dmy(end_match.group(1)) if end_match else None
 
         return {
             "id": cid,
             "url": url,
-            "type": title_match.group("type").strip() if title_match else None,
-            "kontr_data_start": _parse_dmy(title_match.group("date")) if title_match else None,
             "kontr_data_end": kontr_data_end,
             "kontr_stat": kontr_stat,
         }
@@ -342,44 +375,50 @@ class SamrukParser(ParserAdapter):
         serializable = []
         for d in details:
             item = dict(d)
-            item["kontr_data_start"] = d["kontr_data_start"].isoformat() if d["kontr_data_start"] else None
-            item["kontr_data_end"] = d["kontr_data_end"].isoformat() if d["kontr_data_end"] else None
+            if "kontr_data_start" in item:
+                item["kontr_data_start"] = (
+                    d["kontr_data_start"].isoformat() if d.get("kontr_data_start") else None
+                )
+            if "kontr_data_end" in item:
+                item["kontr_data_end"] = d["kontr_data_end"].isoformat() if d.get("kontr_data_end") else None
             serializable.append(item)
         return json.dumps(serializable, ensure_ascii=False)
 
     async def parse(self, row: GapRow) -> ParseResult:
         search_term = row.nomer_kontrakta_norm or row.nomer_kontrakta
-        ids: list[int] = []
+        primary_id: int | None = None
         try:
-            ids = await self._search(search_term)
-            if not ids:
+            primary = await self._search(search_term)
+            if primary is None:
                 return ParseResult(
                     kontr_id=row.kontr_id,
                     status_name=StatusName.NOT_FOUND,
                     parse_source_url=self._build_search_url(search_term),
                     error_message=(
                         "Контракт не найден на zakup.sk.kz по системному номеру "
-                        "(проверены SIGNED и остальные статусы)"
+                        "(проверены все статусы, точных совпадений номера нет)"
                     ),
                 )
 
-            details = [await self._fetch_detail(cid) for cid in ids]
-            primary = self._pick_primary(details)
+            primary_id = primary["id"]
+            detail = await self._fetch_detail(primary_id)
 
             return ParseResult(
                 kontr_id=row.kontr_id,
                 status_name=StatusName.DONE,
                 kontr_data_start=primary["kontr_data_start"],
-                kontr_data_end=primary["kontr_data_end"],
-                kontr_stat=primary["kontr_stat"],
-                parse_source_url=primary["url"],
-                raw_response=self._serialize_details(details),
+                kontr_data_end=detail["kontr_data_end"],
+                kontr_stat=detail["kontr_stat"],
+                parse_source_url=detail["url"],
+                raw_response=self._serialize_details([{**primary, **detail}]),
             )
         except Exception as exc:  # noqa: BLE001 — Playwright: timeout/navigation/etc.
             logger.exception("Samruk parse error for kontr_id=%s", row.kontr_id)
             return ParseResult(
                 kontr_id=row.kontr_id,
                 status_name=StatusName.ERROR,
-                parse_source_url=self._DETAIL_URL_TMPL.format(cid=ids[0]) if ids else self._build_search_url(search_term),
+                parse_source_url=(
+                    self._DETAIL_URL_TMPL.format(cid=primary_id) if primary_id else self._build_search_url(search_term)
+                ),
                 error_message=f"Playwright error: {exc}",
             )
