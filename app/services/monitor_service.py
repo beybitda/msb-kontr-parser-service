@@ -72,9 +72,5 @@ def already_running(business_date: date, process_name: str) -> bool:
     return monitor_repo.already_running(business_date, process_name) == "RUNNING"
 
 
-def already_succeeded(business_date: date, process_name: str) -> bool:
-    return monitor_repo.already_running(business_date, process_name) == "SUCCESS"
-
-
 def is_rerun_not_found_running(business_date: date, process_name: str) -> bool:
     return monitor_repo.is_task_running(business_date, process_name, "RERUN_NOT_FOUND")

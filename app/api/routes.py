@@ -45,12 +45,6 @@ async def trigger(req: TriggerRequest, background_tasks: BackgroundTasks) -> Tri
         return TriggerResponse(status="ALREADY_RUNNING", process_run_id="")
 
     process_run_id = f"SVC-{uuid.uuid4()}"
-    if monitor_service.already_succeeded(req.business_date, settings.process_name):
-        return TriggerResponse(
-            status="ALREADY_SUCCESS",
-            process_run_id=process_run_id,
-            detail="pipeline already completed successfully for this process_run_id",
-        )
 
     background_tasks.add_task(orchestrator.run, process_run_id, req.business_date, req.merge)
     logger.info(
