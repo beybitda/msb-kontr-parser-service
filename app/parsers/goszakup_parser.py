@@ -22,6 +22,17 @@ _SHOW_ID_RE = re.compile(r"/ru/egzcontract/cpublic/show/(\d+)")
 
 _NOT_FOUND_MARKER = "Договор не найден"
 
+# Наблюдение с портала: по части номеров (NOMER_KONTRAKTA_NORM) поиск
+# ничего не находит, хотя договор существует под соседним номером доп.
+# соглашения — последний сегмент (после последнего "/") на единицу
+# больше, например "191041027733/250239/00" не находится, а
+# "191041027733/250239/01" находится; либо "960540000620/250031/01" не
+# находится, а "960540000620/250031/02" находится. Поэтому если основной
+# поиск не дал результатов, дополнительно пробуем последний числовой
+# сегмент +1 (ровно один раз, только для Госзакупок).
+_LAST_SEGMENT_RE = re.compile(r"^(.*/)(\d+)$")
+_LAST_SEGMENT_MAX_OFFSET = 3  # если базовый номер не найден, пробуем +1, +2, +3
+
 _RESULT_TABLE_ID = "search-result"
 
 _LISTING_ID_COL = "#"
@@ -211,16 +222,48 @@ class GoszakupParser(ParserAdapter):
          serializable.append(item)
       return json.dumps(serializable, ensure_ascii=False)
 
+   @staticmethod
+   def _shift_last_segment(nomer: str, offset: int) -> str | None:
+      """'191041027733/250239/00' + offset=1 -> '.../01', offset=3 -> '.../03'.
+      Ширина последнего сегмента (ведущие нули) сохраняется. Возвращает
+      None, если номер не заканчивается на "/<цифры>" (нечего сдвигать)."""
+      m = _LAST_SEGMENT_RE.match(nomer)
+      if not m:
+         return None
+      prefix, digits = m.groups()
+      shifted = str(int(digits) + offset).zfill(len(digits))
+      return f"{prefix}{shifted}"
+
    async def parse(self, row: GapRow) -> ParseResult:
       search_term = row.nomer_kontrakta_norm or row.nomer_kontrakta
       try:
          listing_rows = await self._search(search_term)
+
+         if not listing_rows:
+            for offset in range(1, _LAST_SEGMENT_MAX_OFFSET + 1):
+               shifted = self._shift_last_segment(search_term, offset)
+               if shifted is None:
+                  break  # номер не заканчивается цифрами — дальше пробовать нечего
+
+               fallback_rows = await self._search(shifted)
+               if fallback_rows:
+                  logger.info(
+                     "Goszakup: nomer %s не найден, найдено по +%d к последнему сегменту -> %s",
+                     search_term, offset, shifted,
+                  )
+                  listing_rows = fallback_rows
+                  search_term = shifted
+                  break
+
          if not listing_rows:
                return ParseResult(
                   kontr_id=row.kontr_id,
                   status_name=StatusName.NOT_FOUND,
                   parse_source_url=self._settings.goszakup_base_url,
-                  error_message="Контракт не найден на goszakup.gov.kz по системному номеру",
+                  error_message=(
+                     "Контракт не найден на goszakup.gov.kz по системному номеру "
+                     f"(в т.ч. с +1..+{_LAST_SEGMENT_MAX_OFFSET} к последнему сегменту)"
+                  ),
                )
 
          details: list[dict] = []
@@ -256,5 +299,5 @@ class GoszakupParser(ParserAdapter):
                kontr_id=row.kontr_id,
                status_name=StatusName.ERROR,
                parse_source_url=self._settings.goszakup_base_url,
-               error_message=f"HTTP error: {exc}",
+               error_message=f"HTTP error: {exc!r}",
          )
