@@ -30,8 +30,15 @@ class Settings(BaseSettings):
     
     samruk_base_url: str = "https://zakup.sk.kz/#/ext?tabs=contractCard&page=1"
 
-    # --- Прочее ---
+    # --- Логирование ---
     log_level: str = "INFO"
+    # путь до лог-файла; директория создаётся автоматически, если её нет.
+    # относительный путь -> относительно рабочей директории процесса
+    # (в контейнере это /app, см. Dockerfile/docker-compose.yml).
+    log_file: str = "logs/app.log"
+    log_to_console: bool = False  # дублировать ли лог в stdout/терминал
+    log_max_bytes: int = 10 * 1024 * 1024  # 10 MB на файл до ротации
+    log_backup_count: int = 5  # сколько ротированных файлов хранить
 
     # --- Логическое имя сквозного процесса (общий PROCESS_NAME с Informatica) ---
     process_name: str = "GRN_BLANK_MONITORING"

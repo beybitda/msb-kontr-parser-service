@@ -7,10 +7,11 @@ from fastapi import FastAPI
 
 from app.api.routes import router
 from app.core.config import get_settings
+from app.core.logging_config import configure_logging
 from app.db.connection import close_pool, init_pool
 
 settings = get_settings()
-logging.basicConfig(level=settings.log_level)
+configure_logging()
 logger = logging.getLogger(__name__)
 
 

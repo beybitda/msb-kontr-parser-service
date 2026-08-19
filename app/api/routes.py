@@ -40,8 +40,10 @@ async def trigger(req: TriggerRequest, background_tasks: BackgroundTasks) -> Tri
     process_run_id больше не приходит от вызывающей стороны — генерируется
     здесь; идемпотентность теперь по business_date (один прогон пайплайна
     на бизнес-дату)."""
+    logger.info("POST /parser/trigger business_date=%s merge=%s", req.business_date, req.merge)
     settings = get_settings()
     if monitor_service.already_running(req.business_date, settings.process_name):
+        logger.info("POST /parser/trigger rejected: ALREADY_RUNNING business_date=%s", req.business_date)
         return TriggerResponse(status="ALREADY_RUNNING", process_run_id="")
 
     process_run_id = f"SVC-{uuid.uuid4()}"
@@ -56,6 +58,7 @@ async def trigger(req: TriggerRequest, background_tasks: BackgroundTasks) -> Tri
 
 @router.get("/parser/status/{process_run_id}", response_model=RunStatusResponse, dependencies=[Depends(verify_api_key)])
 async def get_status(process_run_id: str) -> RunStatusResponse:
+    logger.info("GET /parser/status/%s", process_run_id)
     settings = get_settings()
     rows = monitor_repo.fetch_run_status(process_run_id)
     tasks = [
@@ -69,6 +72,7 @@ async def get_status(process_run_id: str) -> RunStatusResponse:
         )
         for r in rows
     ]
+    logger.info("GET /parser/status/%s -> %d task rows", process_run_id, len(tasks))
     return RunStatusResponse(process_run_id=process_run_id, process_name=settings.process_name, tasks=tasks)
 
 
@@ -78,6 +82,10 @@ async def parse_one(req: SingleParseRequest) -> SingleParseResponse:
     - нет GAP_ANALYSIS (номер и портал приходят в запросе);
     - нет UPDATE_TARGET_TABLE (в MSB_DB_GRN_BLANK_MONITOR ничего не пишется);
     - синхронный, один шаг мониторинга PARSE_SINGLE_CONTRACT."""
+    logger.info(
+        "POST /parser/parse-one nomer_kontrakta=%s naim_portala=%s",
+        req.nomer_kontrakta, req.naim_portala,
+    )
     process_run_id = f"SVC-SINGLE-{uuid.uuid4()}"
     nomer_norm = normalize_nomer(req.nomer_kontrakta)
 
@@ -102,8 +110,13 @@ async def parse_one(req: SingleParseRequest) -> SingleParseResponse:
     try:
         result = await orchestrator.run_single(process_run_id, date.today(), row)
     except ValueError as exc:
+        logger.warning("POST /parser/parse-one failed: %s", exc)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    logger.info(
+        "POST /parser/parse-one done: kontr_id=%s status=%s process_run_id=%s",
+        result.kontr_id, result.status_name.value, process_run_id,
+    )
     return SingleParseResponse(
         kontr_id=result.kontr_id,
         status_name=result.status_name.value,
@@ -122,6 +135,7 @@ async def parse_many(req: ManyParseRequest) -> ManyParseResponse:
     заводятся/переиспользуются в MSB_DB_KONTR_PARSE по очереди (как в
     parse_one), затем парсятся одним process_run_id, сгруппированные по
     порталу (см. orchestrator.run_many)."""
+    logger.info("POST /parser/parse-many contracts=%d", len(req.contracts))
     process_run_id = f"SVC-MANY-{uuid.uuid4()}"
 
     rows: list[GapRow] = []
@@ -149,8 +163,13 @@ async def parse_many(req: ManyParseRequest) -> ManyParseResponse:
     try:
         results = await orchestrator.run_many(process_run_id, date.today(), rows)
     except ValueError as exc:
+        logger.warning("POST /parser/parse-many failed: process_run_id=%s error=%s", process_run_id, exc)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    logger.info(
+        "POST /parser/parse-many done: process_run_id=%s results=%d",
+        process_run_id, len(results),
+    )
     return ManyParseResponse(
         process_run_id=process_run_id,
         results=[
@@ -173,18 +192,28 @@ async def merge(req: MergeRequest) -> MergeResponse:
     """Ручной/отложенный запуск UPDATE_TARGET_TABLE для process_run_id,
     для которого /parser/trigger вызывался с merge=false (либо merge
     нужно перезапустить отдельно после ручного разбора ошибок)."""
+    logger.info("POST /parser/merge business_date=%s", req.business_date)
     process_run_id = f"SVC-MERGE-{uuid.uuid4()}"
     rows = orchestrator.run_merge(process_run_id, req.business_date)
+    logger.info(
+        "POST /parser/merge done: process_run_id=%s rows_merged=%d",
+        process_run_id, rows,
+    )
     return MergeResponse(process_run_id=process_run_id, rows_merged=rows)
 
 
 @router.post("/parser/rerun-not-found", response_model=RerunNotFoundResponse, dependencies=[Depends(verify_api_key)])
 async def rerun_not_found(req: RerunNotFoundRequest, background_tasks: BackgroundTasks) -> RerunNotFoundResponse:
     """Повторный запуск парсинга для всех NOT_FOUND-записей MSB_DB_KONTR_PARSE."""
+    logger.info("POST /parser/rerun-not-found business_date=%s", req.business_date)
     settings = get_settings()
     not_found_count = parse_repo.count_not_found()
 
     if monitor_service.is_rerun_not_found_running(req.business_date, settings.process_name):
+        logger.info(
+            "POST /parser/rerun-not-found rejected: ALREADY_RUNNING business_date=%s",
+            req.business_date,
+        )
         return RerunNotFoundResponse(
             status="ALREADY_RUNNING",
             process_run_id="",
@@ -193,6 +222,10 @@ async def rerun_not_found(req: RerunNotFoundRequest, background_tasks: Backgroun
         )
 
     if not_found_count == 0:
+        logger.info(
+            "POST /parser/rerun-not-found: NOTHING_TO_RERUN business_date=%s",
+            req.business_date,
+        )
         return RerunNotFoundResponse(
             status="NOTHING_TO_RERUN",
             process_run_id="",
@@ -211,4 +244,5 @@ async def rerun_not_found(req: RerunNotFoundRequest, background_tasks: Backgroun
 
 @router.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
+    logger.info("GET /health")
     return HealthResponse()
